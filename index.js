@@ -7,6 +7,13 @@ const { createClient } = require("webdav");
 const { loadavg } = require("node:os");
 require("dotenv").config();
 
+const FILE_STATUS = Object.freeze({
+  PENDING: "pending",
+  DOWNLOADING: "downloading",
+  COMPLETED: "completed",
+  ERROR: "error",
+});
+
 const DIRECTORY_LIST_DELAY_MS = 1000;
 const REPORT_INTERVAL_MS = 30_000;
 const DISCOVERY_INTERVAL_MS = 60_000;
@@ -78,6 +85,7 @@ function isRateLimitError(error) {
 }
 
 async function loadState() {
+  log(`Загружаем состояние...`);
   try {
     const saved = JSON.parse(await fs.readFile(config.statePath, "utf8"));
     if (saved && saved.files && typeof saved.files === "object") {
@@ -90,14 +98,18 @@ async function loadState() {
     }
   }
 
+  log(`Формируем очередь загрузки...`);
+
   for (const [remotePath, file] of Object.entries(state.files)) {
-    if (file.status === "downloading") {
-      file.status = "pending";
+    if (file.status === FILE_STATUS.DOWNLOADING) {
+      file.status = FILE_STATUS.PENDING;
     }
-    if (file.status === "pending") {
+    if (file.status === FILE_STATUS.PENDING) {
       mainQueue.push(remotePath);
     }
   }
+
+  log(`Состояние загружено. ${mainQueue.length} файлов в очереди.`);
 }
 
 function persistState() {
@@ -207,18 +219,18 @@ async function discoverRemoteFiles() {
       if (!previous) {
         state.files[remotePath] = {
           ...remoteFile,
-          status: "pending",
+          status: FILE_STATUS.PENDING,
           attempts: 0,
           nextRetryAt: null,
         };
         mainQueue.push(remotePath);
         await persistState();
-      } else if (previous.status === "completed") {
+      } else if (previous.status === FILE_STATUS.COMPLETED) {
         return;
       } else if (metadataChanged(previous, remoteFile)) {
-        if (previous.status === "downloading") return;
+        if (previous.status === FILE_STATUS.DOWNLOADING) return;
         Object.assign(previous, remoteFile, {
-          status: "pending",
+          status: FILE_STATUS.PENDING,
           attempts: 0,
           nextRetryAt: null,
         });
@@ -235,7 +247,7 @@ async function discoverRemoteFiles() {
     });
 
     for (const remotePath of Object.keys(state.files)) {
-      if (!seen.has(remotePath) && state.files[remotePath].status !== "completed") {
+      if (!seen.has(remotePath) && state.files[remotePath].status !== FILE_STATUS.COMPLETED) {
         delete state.files[remotePath];
         await persistState();
       }
@@ -280,7 +292,7 @@ async function downloadFile(remotePath) {
   const file = state.files[remotePath];
   if (!file) return;
 
-  file.status = "downloading";
+  file.status = FILE_STATUS.DOWNLOADING;
   await persistState();
   try {
     const destination = localPathFor(remotePath);
@@ -304,13 +316,13 @@ async function downloadFile(remotePath) {
 
     await fs.rename(temporaryPath, destination);
 
-    file.status = "completed";
+    file.status = FILE_STATUS.COMPLETED;
     file.downloadedAt = new Date().toISOString();
     file.nextRetryAt = null;
     await persistState();
     log(`Скачан: ${remotePath}`);
   } catch (error) {
-    file.status = "error";
+    file.status = FILE_STATUS.ERROR;
     file.attempts = (file.attempts || 0) + 1;
     const delay = retryDelay(file.attempts);
     file.nextRetryAt = Date.now() + delay;
@@ -324,7 +336,7 @@ async function mainWorker() {
   while (!stopping) {
     const remotePath = mainQueue.shift();
     if (remotePath) {
-      if (state.files[remotePath]?.status === "pending") {
+      if (state.files[remotePath]?.status === FILE_STATUS.PENDING) {
         await downloadFile(remotePath);
       }
       continue;
@@ -338,7 +350,7 @@ async function retryWorker() {
   while (!stopping) {
     const now = Date.now();
     const dueRetry = Object.entries(state.files).find(([, file]) =>
-      file.status === "error" && (file.nextRetryAt || 0) <= now);
+      file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now);
 
     if (dueRetry) {
       await downloadFile(dueRetry[0]);
@@ -346,7 +358,7 @@ async function retryWorker() {
     }
 
     const nextRetryAt = Object.values(state.files).reduce((earliest, file) => {
-      return file.status === "error"
+      return file.status === FILE_STATUS.ERROR
         ? Math.min(earliest, file.nextRetryAt || 0)
         : earliest;
     }, Infinity);
@@ -389,8 +401,8 @@ async function writeReport() {
       const summary = folders.get(folderPath);
       summary.total += 1;
       summary.bytes += file.size || 0;
-      if (file.status === "completed") summary.completed += 1;
-      if (file.status === "error" || (file.status === "downloading" && file.attempts > 0)) {
+      if (file.status === FILE_STATUS.COMPLETED) summary.completed += 1;
+      if (file.status === FILE_STATUS.ERROR || (file.status === FILE_STATUS.DOWNLOADING && file.attempts > 0)) {
         summary.errors += 1;
       }
     }
