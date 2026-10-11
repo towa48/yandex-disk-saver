@@ -56,7 +56,7 @@ function createWebDavClient() {
 
 var client = createWebDavClient();
 
-const state = { version: 1, files: {} };
+const state = { version: 1, files: {}, folders: {} };
 let stopping = false;
 let saveChain = Promise.resolve();
 let mainWorkerRunning = false;
@@ -171,38 +171,45 @@ async function getDirectoryContentsWithRecovery(directory) {
   }
 }
 
-async function listRemoteFiles(onFile) {
-  const files = [];
-  const directories = [config.remotePath];
-  const visited = new Set();
+async function listRemoteFiles(remotePath, onFile) {
+  const folder = state.folders[remotePath] || {
+    path: remotePath,
+    status: FILE_STATUS.PENDING,
+    children: []
+  };
 
-  while (directories.length > 0) {
-    const directory = directories.pop();
-    if (visited.has(directory)) continue;
-    visited.add(directory);
+  if (folder.status === FILE_STATUS.COMPLETED) return;
 
-    await sleep(DIRECTORY_LIST_DELAY_MS);
-    const entries = await getDirectoryContentsWithRecovery(directory);
-    log(`directory contents for ${directory}: ${entries.length} entries`);
-    for (const entry of entries) {
-      const remotePath = getEntryPath(entry);
-      if (entry.type === "directory") {
-        directories.push(remotePath.endsWith("/") ? remotePath : `${remotePath}/`);
-      } else if (entry.type === "file") {
-        const parsedSize = Number(entry.size);
-        const remoteFile = {
-          remotePath,
-          size: Number.isFinite(parsedSize) && parsedSize >= 0 ? parsedSize : null,
-          etag: entry.etag || null,
-          lastmod: entry.lastmod || null,
-        };
-        files.push(remoteFile);
-        await onFile(remoteFile);
-      }
+  await sleep(DIRECTORY_LIST_DELAY_MS);
+  const entries = folder.status == FILE_STATUS.DOWNLOADING
+    ? folder.children.map(path => ({ type: "directory", filename: path })) // only folders
+    : await getDirectoryContentsWithRecovery(folder.path);
+
+  log(`directory contents for ${folder.path}: ${entries.length} entries`);
+
+  for (const entry of entries) {
+    const remotePath = getEntryPath(entry);
+    if (entry.type === "directory") {
+      const childrenPath = remotePath.endsWith("/") ? remotePath : `${remotePath}/`;
+      folder.children.push(childrenPath);
+    } else if (entry.type === "file") {
+      const parsedSize = Number(entry.size);
+      const remoteFile = {
+        remotePath,
+        size: Number.isFinite(parsedSize) && parsedSize >= 0 ? parsedSize : null,
+        etag: entry.etag || null,
+        lastmod: entry.lastmod || null,
+      };
+      await onFile(remoteFile);
     }
   }
 
-  return files;
+  for (const child of folder.children) {
+    await listRemoteFiles(child, onFile);
+  }
+
+  folder.status = FILE_STATUS.COMPLETED;
+  state.folders[remotePath] = folder;
 }
 
 function metadataChanged(previous, remoteFile) {
@@ -220,7 +227,7 @@ async function discoverRemoteFiles() {
   try {
     const seen = new Set();
 
-    const remoteFiles = await listRemoteFiles(async (remoteFile) => {
+    await listRemoteFiles(config.remotePath, async (remoteFile) => {
       const { remotePath } = remoteFile;
       seen.add(remotePath);
       const previous = state.files[remotePath];
@@ -261,7 +268,6 @@ async function discoverRemoteFiles() {
         await persistState();
       }
     }
-    log(`Обнаружено файлов: ${remoteFiles.length}`);
   } catch (error) {
     log(`Ошибка сканирования WebDAV: ${error.message}`);
     if (isRateLimitError(error)) {
@@ -405,11 +411,14 @@ async function retryWorker() {
       const file = dueRetry[1];
       const timeout = calculateDownloadTimeout(file?.size);
       await downloadFile(dueRetry[0], timeout);
+
+      // wait to the next entity
+      await sleep(250);
       continue;
     }
 
-    const waitTime = 1_000;
-    await sleep(waitTime);
+    // wait for the queue
+    await sleep(1000);
   }
   log(`=> Retry worker stopped. Error queue length: ${errorQueue.length}`);
 }
