@@ -19,6 +19,12 @@ const REPORT_INTERVAL_MS = 30_000;
 const RETRY_DELAYS_MS = [10_000, 20_000, 30_000];
 const MAX_RETRIES = 10;
 
+const YELLOW_COLOR = "\x1b[33m";
+const RESET_COLOR = "\x1b[0m";
+const RED_COLOR = "\x1b[31m";
+const ORANGE_COLOR = "\x1b[38;5;214m";
+const GREY_COLOR = "\x1b[90m";
+
 function readConfig() {
   const protocol = (process.env.WEBDAV_PROTOCOL || "http").replace(/:$/, "");
   const host = process.env.WEBDAV_HOST || "localhost";
@@ -78,8 +84,24 @@ function sleep(milliseconds) {
   });
 }
 
-function log(message) {
-  console.log(`[${new Date().toISOString()}] ${message}`);
+function log(message, logLevel) {
+  let result = message;
+  switch(logLevel) {
+    case "error":
+      result = `${RED_COLOR}${message}${RESET_COLOR}`;
+      break;
+    case "warn":
+      result = `${ORANGE_COLOR}${message}${RESET_COLOR}`;
+      break;
+    case "trace":
+      result = `${GREY_COLOR}${message}${RESET_COLOR}`;
+      break;
+    case "info":
+    default:
+      result = message;
+      break;
+  }
+  console.log(`${YELLOW_COLOR}[${new Date().toISOString()}]${RESET_COLOR} ${result}`);
 }
 
 function isRateLimitError(error) {
@@ -87,7 +109,7 @@ function isRateLimitError(error) {
 }
 
 async function loadState() {
-  log(`Загружаем состояние...`);
+  log(`Загружаем состояние...`, 'trace');
   try {
     const saved = JSON.parse(await fs.readFile(config.statePath, "utf8"));
     if (saved && saved.files && typeof saved.files === "object") {
@@ -96,11 +118,11 @@ async function loadState() {
     }
   } catch (error) {
     if (error.code !== "ENOENT") {
-      log(`Не удалось загрузить состояние: ${error.message}. Будет создано новое.`);
+      log(`Не удалось загрузить состояние: ${error.message}. Будет создано новое.`, 'error');
     }
   }
 
-  log(`Формируем очередь загрузки...`);
+  log(`Формируем очередь загрузки...`, 'trace');
 
   for (const [remotePath, file] of Object.entries(state.files)) {
     if (file.status === FILE_STATUS.DOWNLOADING) {
@@ -113,18 +135,18 @@ async function loadState() {
     }
   }
 
-  log(`Состояние загружено. ${mainQueue.length} файлов в очереди.`);
+  log(`Состояние загружено. ${mainQueue.length} файлов в очереди.`, 'info');
 }
 
 function persistState() {
   var snapshot = JSON.stringify(state, null, 2);
   saveChain = saveChain
-    .catch(e => log(`Не удалось сохранить состояние: ${e.message}`))
+    .catch(e => log(`Не удалось сохранить состояние: ${e.message}`, 'error'))
     .then(async () => {
       await fs.mkdir(path.dirname(config.statePath), { recursive: true });
       await fs.writeFile(config.statePath, snapshot, "utf8");
     })
-    .catch((error) => log(`Не удалось сохранить состояние: ${error.message}`));
+    .catch((error) => log(`Не удалось сохранить состояние: ${error.message}`, 'error'));
   return saveChain;
 }
 
@@ -146,10 +168,10 @@ async function getDirectoryContentsWithRecovery(directory) {
         return await getDirectoryContentsWithRecovery(directory);
     }
 
-    log(`Ошибка запроса каталога ${directory}: ${requestError.message}. Проверяю подключение к этому же каталогу.`);
+    log(`Ошибка запроса каталога ${directory}: ${requestError.message}. Проверяю подключение к этому же каталогу.`, 'error');
     try {
       const entries = await client.getDirectoryContents(directory);
-      log(`Подключение WebDAV доступно; продолжаю с каталога ${directory}.`);
+      log(`Подключение WebDAV доступно; продолжаю с каталога ${directory}.`, 'info');
       return entries;
     } catch (checkError) {
       if (isRateLimitError(checkError)) {
@@ -157,12 +179,12 @@ async function getDirectoryContentsWithRecovery(directory) {
         return await getDirectoryContentsWithRecovery(directory);
       }
 
-      log(`Каталог ${directory} недоступен: ${checkError.message}. Пересоздаю клиент.`);
+      log(`Каталог ${directory} недоступен: ${checkError.message}. Пересоздаю клиент.`, 'error');
       client = createWebDavClient();
 
       try {
         const entries = await client.getDirectoryContents(directory);
-        log(`Подключение восстановлено; продолжаю с каталога ${directory}.`);
+        log(`Подключение восстановлено; продолжаю с каталога ${directory}.`, 'info');
         return entries;
       } catch (reconnectError) {
         await sleep(DIRECTORY_LIST_DELAY_MS);
@@ -189,7 +211,7 @@ async function listRemoteFiles(remotePath, onFile) {
   folder.status = FILE_STATUS.DOWNLOADING;
   state.folders[remotePath] = folder;
 
-  log(`directory contents for ${folder.path}: ${entries.length} entries`);
+  log(`directory contents for ${folder.path}: ${entries.length} entries`, 'info');
 
   for (const entry of entries) {
     const remotePath = getEntryPath(entry);
@@ -275,13 +297,13 @@ async function discoverRemoteFiles() {
       }
     }
   } catch (error) {
-    log(`Ошибка сканирования WebDAV: ${error.message}`);
+    log(`Ошибка сканирования WebDAV: ${error.message}`, 'error');
     if (isRateLimitError(error)) {
-      log("Получен HTTP 429; клиент не пересоздаётся.");
+      log("Получен HTTP 429; клиент не пересоздаётся.", 'warn');
     }
   } finally {
     discoveryRunning = false;
-    log('=> Сканирование завершено.');
+    log('=> Сканирование завершено.', 'info');
   }
 }
 
@@ -295,13 +317,13 @@ function localPathFor(remotePath) {
   });
 
   if (segments.some((segment) => segment === "." || segment === ".." || /[\\/]/.test(segment))) {
-    throw new Error(`Недопустимый путь WebDAV: ${remotePath}`);
+    throw new Error(`Недопустимый путь WebDAV: ${remotePath}`, 'error');
   }
 
   const localPath = path.resolve(config.destinationDir, ...segments);
   const relativePath = path.relative(config.destinationDir, localPath);
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-    throw new Error(`Путь выходит за папку назначения: ${remotePath}`);
+    throw new Error(`Путь выходит за папку назначения: ${remotePath}`, 'error');
   }
   return localPath;
 }
@@ -315,7 +337,7 @@ async function downloadFile(remotePath, timeout) {
   if (!file) return;
 
   const timeout2 = timeout || 60_000;
-  log(`Начало скачивания: ${remotePath}. Таймаут: ${(timeout2/1000).toFixed(2)} сек.`);
+  log(`Начало скачивания: ${remotePath}. Таймаут: ${(timeout2/1000).toFixed(2)} сек.`, 'trace');
 
   file.status = FILE_STATUS.DOWNLOADING;
   await persistState();
@@ -352,7 +374,7 @@ async function downloadFile(remotePath, timeout) {
     }
 
     await persistState();
-    log(`Скачан: ${remotePath}`);
+    log(`Скачан: ${remotePath}`, 'trace');
   } catch (error) {
     file.status = FILE_STATUS.ERROR;
     file.attempts = (file.attempts || 0) + 1;
@@ -362,7 +384,7 @@ async function downloadFile(remotePath, timeout) {
     errorQueue.push(file);
 
     await persistState();
-    log(`Ошибка ${remotePath}: ${error.message}. Повтор через ${delay / 1000} сек.`);
+    log(`Ошибка ${remotePath}: ${error.message}. Повтор через ${delay / 1000} сек.`, 'error');
   }
 }
 
@@ -403,7 +425,7 @@ async function mainWorker() {
     await sleep(250);
   }
   mainWorkerRunning = false;
-  log(`=> Main worker stopped. Error queue length: ${errorQueue.length}`);
+  log(`=> Main worker stopped. Error queue length: ${errorQueue.length}`, 'info');
 }
 
 async function retryWorker() {
@@ -426,7 +448,7 @@ async function retryWorker() {
     // wait for the queue
     await sleep(1000);
   }
-  log(`=> Retry worker stopped. Error queue length: ${errorQueue.length}`);
+  log(`=> Retry worker stopped. Error queue length: ${errorQueue.length}`, 'info');
 }
 
 function escapeHtml(value) {
@@ -510,7 +532,7 @@ async function writeReport() {
   await fs.mkdir(config.destinationDir, { recursive: true });
   await fs.writeFile(temporaryPath, html, "utf8");
   await fs.rename(temporaryPath, reportPath);
-  log(`Отчёт обновлён: ${reportPath}`);
+  log(`Отчёт обновлён: ${reportPath}`, 'info');
 }
 
 async function runPeriodic(task, interval, label) {
@@ -518,7 +540,7 @@ async function runPeriodic(task, interval, label) {
     try {
       await task();
     } catch (error) {
-      log(`${label}: ${error.message}`);
+      log(`${label}: ${error.message}`, 'error');
     }
     await sleep(interval);
   }
@@ -528,7 +550,7 @@ async function shutdown() {
   if (stopping) return;
   stopping = true;
   for (const wake of waiters) wake();
-  log("Остановка: сохраняю состояние...");
+  log("Остановка: сохраняю состояние...", 'info');
   await persistState();
   await Promise.allSettled(runningTasks);
   await persistState();
@@ -558,13 +580,12 @@ async function start() {
     runPeriodic(writeReport, REPORT_INTERVAL_MS, "Ошибка создания отчёта"),
   );
 
+  log(`Запущено. Сервер: ${config.url}; папка назначения: ${config.destinationDir}`, 'info');
+
   // wait for the main threads
   await Promise.allSettled([ main, retry, discovery ]);
 
   if (stopping) return;
-
-  
-  log(`Запущено. Сервер: ${config.url}; папка назначения: ${config.destinationDir}`);
 }
 
 start().catch((error) => {
