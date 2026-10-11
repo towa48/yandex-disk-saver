@@ -338,7 +338,7 @@ async function downloadFile(remotePath) {
 }
 
 async function mainWorker() {
-  while (!stopping) {
+  while (!stopping && (mainQueue.length > 0 || discoveryRunning)) {
     const remotePath = mainQueue.shift();
     if (remotePath) {
       if (state.files[remotePath]?.status === FILE_STATUS.PENDING) {
@@ -352,7 +352,7 @@ async function mainWorker() {
 }
 
 async function retryWorker() {
-  while (!stopping) {
+  while (!stopping && (mainQueue.length > 0 || discoveryRunning)) {
     const now = Date.now();
     const dueRetry = Object.entries(state.files).find(([, file]) =>
       file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now);
@@ -486,19 +486,29 @@ async function start() {
   await loadState();
   await fs.mkdir(config.destinationDir, { recursive: true });
 
-  await discoverRemoteFiles();
-
-  runningTasks = [
-    mainWorker(),
-    retryWorker(),
-    runPeriodic(writeReport, REPORT_INTERVAL_MS, "Ошибка создания отчёта"),
-  ];
-
   const stop = async () => {
     await shutdown();
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+
+  const main = mainWorker(); 
+  const retry = retryWorker();
+  const discovery = discoverRemoteFiles();
+
+  runningTasks.push(
+    main,
+    retry,
+    discovery,
+    runPeriodic(writeReport, REPORT_INTERVAL_MS, "Ошибка создания отчёта"),
+  );
+
+  // wait for the main threads
+  await Promise.allSettled([ main, retry, discovery ]);
+
+  if (stopping) return;
+
+  
   log(`Запущено. Сервер: ${config.url}; папка назначения: ${config.destinationDir}`);
 }
 
