@@ -6,7 +6,6 @@ const crypto = require("node:crypto");
 const { createClient } = require("webdav");
 require("dotenv").config();
 
-const WORKER_COUNT = 2;
 const DIRECTORY_LIST_DELAY_MS = 500;
 const REPORT_INTERVAL_MS = 60_000;
 const DISCOVERY_INTERVAL_MS = 60_000;
@@ -45,7 +44,7 @@ const client = createClient(config.url, {
   password: config.password,
 });
 
-let state = { version: 1, files: {} };
+const state = { version: 1, files: {} };
 let stopping = false;
 let saveChain = Promise.resolve();
 let discoveryRunning = false;
@@ -74,7 +73,8 @@ async function loadState() {
   try {
     const saved = JSON.parse(await fs.readFile(config.statePath, "utf8"));
     if (saved && saved.files && typeof saved.files === "object") {
-      state = { version: 1, files: saved.files };
+      state.files = saved.files;
+      state.version = saved.version || 1;
     }
   } catch (error) {
     if (error.code !== "ENOENT") {
@@ -96,14 +96,13 @@ async function loadState() {
 }
 
 function persistState() {
-  const snapshot = JSON.stringify(state, null, 2);
+  var snapshot = JSON.stringify(state, null, 2);
   saveChain = saveChain
-    .catch(() => {})
+    .catch(e => log(`Не удалось сохранить состояние: ${e.message}`))
     .then(async () => {
       await fs.mkdir(path.dirname(config.statePath), { recursive: true });
-      const temporaryPath = `${config.statePath}.tmp`;
-      await fs.writeFile(temporaryPath, snapshot, "utf8");
-      await fs.rename(temporaryPath, config.statePath);
+      await fs.writeFile(config.statePath, snapshot, "utf8");
+      log(`Состояние сохранено в ${config.statePath}`);
     })
     .catch((error) => log(`Не удалось сохранить состояние: ${error.message}`));
   return saveChain;
@@ -118,7 +117,7 @@ function getEntryPath(entry) {
   return path.posix.join(config.remotePath, entry.basename);
 }
 
-async function listRemoteFiles() {
+async function listRemoteFiles(onFile) {
   const files = [];
   const directories = [config.remotePath];
   const visited = new Set();
@@ -130,19 +129,21 @@ async function listRemoteFiles() {
 
     await sleep(DIRECTORY_LIST_DELAY_MS);
     const entries = await client.getDirectoryContents(directory);
+    log(`directory contents for ${directory}: ${entries.length} entries`);
     for (const entry of entries) {
-      log(`directory contents for ${directory}: ${entries.length} entries`);
       const remotePath = getEntryPath(entry);
       if (entry.type === "directory") {
         directories.push(remotePath.endsWith("/") ? remotePath : `${remotePath}/`);
       } else if (entry.type === "file") {
         const parsedSize = Number(entry.size);
-        files.push({
+        const remoteFile = {
           remotePath,
           size: Number.isFinite(parsedSize) && parsedSize >= 0 ? parsedSize : null,
           etag: entry.etag || null,
           lastmod: entry.lastmod || null,
-        });
+        };
+        files.push(remoteFile);
+        await onFile(remoteFile);
       }
     }
   }
@@ -163,10 +164,9 @@ async function discoverRemoteFiles() {
   if (discoveryRunning || stopping) return;
   discoveryRunning = true;
   try {
-    const remoteFiles = await listRemoteFiles();
     const seen = new Set();
 
-    for (const remoteFile of remoteFiles) {
+    const remoteFiles = await listRemoteFiles(async (remoteFile) => {
       const { remotePath } = remoteFile;
       seen.add(remotePath);
       const previous = state.files[remotePath];
@@ -181,7 +181,7 @@ async function discoverRemoteFiles() {
         mainQueue.push(remotePath);
         await persistState();
       } else if (metadataChanged(previous, remoteFile)) {
-        if (previous.status === "downloading") continue;
+        if (previous.status === "downloading") return;
         Object.assign(previous, remoteFile, {
           status: "pending",
           attempts: 0,
@@ -197,7 +197,7 @@ async function discoverRemoteFiles() {
           await persistState();
         }
       }
-    }
+    });
 
     for (const remotePath of Object.keys(state.files)) {
       if (!seen.has(remotePath)) {
@@ -291,35 +291,39 @@ async function downloadFile(remotePath) {
   }
 }
 
-async function mainWorker() {
+async function queueWorker() {
   while (!stopping) {
     const remotePath = mainQueue.shift();
-    if (!remotePath) {
-      await sleep(250);
+    if (remotePath) {
+      if (state.files[remotePath]?.status === "pending") {
+        await downloadFile(remotePath);
+      }
       continue;
     }
-    if (state.files[remotePath]?.status === "pending") {
-      await downloadFile(remotePath);
-    }
-  }
-}
 
-async function retryWorker() {
-  while (!stopping) {
     const now = Date.now();
-    const dueIndex = retryQueue.findIndex((remotePath) => {
-      const file = state.files[remotePath];
+    const dueIndex = retryQueue.findIndex((retryPath) => {
+      const file = state.files[retryPath];
       return file && file.status === "error" && (file.nextRetryAt || 0) <= now;
     });
 
-    if (dueIndex < 0) {
-      await sleep(1_000);
+    if (dueIndex >= 0) {
+      const [retryPath] = retryQueue.splice(dueIndex, 1);
+      queuedRetries.delete(retryPath);
+      await downloadFile(retryPath);
       continue;
     }
 
-    const [remotePath] = retryQueue.splice(dueIndex, 1);
-    queuedRetries.delete(remotePath);
-    await downloadFile(remotePath);
+    const nextRetryAt = retryQueue.reduce((earliest, retryPath) => {
+      const file = state.files[retryPath];
+      return file?.status === "error"
+        ? Math.min(earliest, file.nextRetryAt || 0)
+        : earliest;
+    }, Infinity);
+    const waitTime = Number.isFinite(nextRetryAt)
+      ? Math.min(1_000, Math.max(1, nextRetryAt - Date.now()))
+      : 250;
+    await sleep(waitTime);
   }
 }
 
@@ -438,8 +442,7 @@ async function start() {
   await writeReport().catch((error) => log(`Ошибка создания отчёта: ${error.message}`));
 
   runningTasks = [
-    ...Array.from({ length: WORKER_COUNT }, () => mainWorker()),
-    retryWorker(),
+    queueWorker(),
     runPeriodic(discoverRemoteFiles, DISCOVERY_INTERVAL_MS, "Ошибка сканирования"),
     runPeriodic(writeReport, REPORT_INTERVAL_MS, "Ошибка создания отчёта"),
   ];
