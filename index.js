@@ -6,7 +6,8 @@ const crypto = require("node:crypto");
 const { createClient } = require("webdav");
 require("dotenv").config();
 
-const WORKER_COUNT = 4;
+const WORKER_COUNT = 2;
+const DIRECTORY_LIST_DELAY_MS = 200;
 const STATE_SAVE_INTERVAL_MS = 5_000;
 const REPORT_INTERVAL_MS = 60_000;
 const DISCOVERY_INTERVAL_MS = 60_000;
@@ -128,6 +129,7 @@ async function listRemoteFiles() {
     if (visited.has(directory)) continue;
     visited.add(directory);
 
+    await sleep(DIRECTORY_LIST_DELAY_MS);
     const entries = await client.getDirectoryContents(directory);
     for (const entry of entries) {
       console.log(entry);
