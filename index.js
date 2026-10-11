@@ -50,8 +50,6 @@ let stopping = false;
 let saveChain = Promise.resolve();
 let discoveryRunning = false;
 const mainQueue = [];
-const retryQueue = [];
-const queuedRetries = new Set();
 const waiters = new Set();
 
 function sleep(milliseconds) {
@@ -89,9 +87,6 @@ async function loadState() {
     }
     if (file.status === "pending") {
       mainQueue.push(remotePath);
-    } else if (file.status === "error") {
-      retryQueue.push(remotePath);
-      queuedRetries.add(remotePath);
     }
   }
 }
@@ -280,16 +275,12 @@ async function downloadFile(remotePath) {
     const delay = retryDelay(file.attempts);
     file.nextRetryAt = Date.now() + delay;
 
-    if (!queuedRetries.has(remotePath)) {
-      retryQueue.push(remotePath);
-      queuedRetries.add(remotePath);
-    }
     await persistState();
     log(`Ошибка ${remotePath}: ${error.message}. Повтор через ${delay / 1000} сек.`);
   }
 }
 
-async function queueWorker() {
+async function mainWorker() {
   while (!stopping) {
     const remotePath = mainQueue.shift();
     if (remotePath) {
@@ -299,28 +290,29 @@ async function queueWorker() {
       continue;
     }
 
-    const now = Date.now();
-    const dueIndex = retryQueue.findIndex((retryPath) => {
-      const file = state.files[retryPath];
-      return file && file.status === "error" && (file.nextRetryAt || 0) <= now;
-    });
+    await sleep(250);
+  }
+}
 
-    if (dueIndex >= 0) {
-      const [retryPath] = retryQueue.splice(dueIndex, 1);
-      queuedRetries.delete(retryPath);
-      await downloadFile(retryPath);
+async function retryWorker() {
+  while (!stopping) {
+    const now = Date.now();
+    const dueRetry = Object.entries(state.files).find(([, file]) =>
+      file.status === "error" && (file.nextRetryAt || 0) <= now);
+
+    if (dueRetry) {
+      await downloadFile(dueRetry[0]);
       continue;
     }
 
-    const nextRetryAt = retryQueue.reduce((earliest, retryPath) => {
-      const file = state.files[retryPath];
-      return file?.status === "error"
+    const nextRetryAt = Object.values(state.files).reduce((earliest, file) => {
+      return file.status === "error"
         ? Math.min(earliest, file.nextRetryAt || 0)
         : earliest;
     }, Infinity);
     const waitTime = Number.isFinite(nextRetryAt)
       ? Math.min(1_000, Math.max(1, nextRetryAt - Date.now()))
-      : 250;
+      : 1_000;
     await sleep(waitTime);
   }
 }
@@ -440,7 +432,8 @@ async function start() {
   await writeReport().catch((error) => log(`Ошибка создания отчёта: ${error.message}`));
 
   runningTasks = [
-    queueWorker(),
+    mainWorker(),
+    retryWorker(),
     runPeriodic(discoverRemoteFiles, DISCOVERY_INTERVAL_MS, "Ошибка сканирования"),
     runPeriodic(writeReport, REPORT_INTERVAL_MS, "Ошибка создания отчёта"),
   ];
