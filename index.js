@@ -16,7 +16,6 @@ const FILE_STATUS = Object.freeze({
 
 const DIRECTORY_LIST_DELAY_MS = 1000;
 const REPORT_INTERVAL_MS = 30_000;
-const DISCOVERY_INTERVAL_MS = 60_000;
 const RETRY_DELAYS_MS = [10_000, 20_000, 30_000];
 
 function readConfig() {
@@ -137,7 +136,10 @@ async function getDirectoryContentsWithRecovery(directory) {
   try {
     return await client.getDirectoryContents(directory);
   } catch (requestError) {
-    if (isRateLimitError(requestError)) throw requestError;
+    if (isRateLimitError(requestError)) {
+        await sleep(DIRECTORY_LIST_DELAY_MS);
+        return await getDirectoryContentsWithRecovery(directory);
+    }
 
     log(`Ошибка запроса каталога ${directory}: ${requestError.message}. Проверяю подключение к этому же каталогу.`);
     try {
@@ -145,7 +147,10 @@ async function getDirectoryContentsWithRecovery(directory) {
       log(`Подключение WebDAV доступно; продолжаю с каталога ${directory}.`);
       return entries;
     } catch (checkError) {
-      if (isRateLimitError(checkError)) throw checkError;
+      if (isRateLimitError(checkError)) {
+        await sleep(DIRECTORY_LIST_DELAY_MS);
+        return await getDirectoryContentsWithRecovery(directory);
+      }
 
       log(`Каталог ${directory} недоступен: ${checkError.message}. Пересоздаю клиент.`);
       client = createWebDavClient();
@@ -155,8 +160,8 @@ async function getDirectoryContentsWithRecovery(directory) {
         log(`Подключение восстановлено; продолжаю с каталога ${directory}.`);
         return entries;
       } catch (reconnectError) {
-        log(`Не удалось восстановить каталог ${directory}: ${reconnectError.message}`);
-        throw reconnectError;
+        await sleep(DIRECTORY_LIST_DELAY_MS);
+        return await getDirectoryContentsWithRecovery(directory);
       }
     }
   }
@@ -480,14 +485,12 @@ let runningTasks = [];
 async function start() {
   await loadState();
   await fs.mkdir(config.destinationDir, { recursive: true });
-  await persistState();
+
   await discoverRemoteFiles();
-  await writeReport().catch((error) => log(`Ошибка создания отчёта: ${error.message}`));
 
   runningTasks = [
     mainWorker(),
     retryWorker(),
-    runPeriodic(discoverRemoteFiles, DISCOVERY_INTERVAL_MS, "Ошибка сканирования"),
     runPeriodic(writeReport, REPORT_INTERVAL_MS, "Ошибка создания отчёта"),
   ];
 
