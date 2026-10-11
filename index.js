@@ -98,7 +98,6 @@ function persistState() {
     .then(async () => {
       await fs.mkdir(path.dirname(config.statePath), { recursive: true });
       await fs.writeFile(config.statePath, snapshot, "utf8");
-      log(`Состояние сохранено в ${config.statePath}`);
     })
     .catch((error) => log(`Не удалось сохранить состояние: ${error.message}`));
   return saveChain;
