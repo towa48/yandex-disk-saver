@@ -54,7 +54,7 @@ function createWebDavClient() {
   });
 }
 
-let client = createWebDavClient();
+var client = createWebDavClient();
 
 const state = { version: 1, files: {} };
 let stopping = false;
@@ -269,6 +269,7 @@ async function discoverRemoteFiles() {
     }
   } finally {
     discoveryRunning = false;
+    log('=> Сканирование завершено.');
   }
 }
 
@@ -390,7 +391,7 @@ async function mainWorker() {
     await sleep(250);
   }
   mainWorkerRunning = false;
-  log(`Main worker stopped. Error queue length: ${errorQueue.length}`);
+  log(`=> Main worker stopped. Error queue length: ${errorQueue.length}`);
 }
 
 async function retryWorker() {
@@ -410,7 +411,7 @@ async function retryWorker() {
     const waitTime = 1_000;
     await sleep(waitTime);
   }
-  log(`Retry worker stopped. Error queue length: ${errorQueue.length}`);
+  log(`=> Retry worker stopped. Error queue length: ${errorQueue.length}`);
 }
 
 function escapeHtml(value) {
