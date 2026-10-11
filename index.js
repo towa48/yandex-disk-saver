@@ -7,8 +7,7 @@ const { createClient } = require("webdav");
 require("dotenv").config();
 
 const WORKER_COUNT = 2;
-const DIRECTORY_LIST_DELAY_MS = 200;
-const STATE_SAVE_INTERVAL_MS = 1_000;
+const DIRECTORY_LIST_DELAY_MS = 500;
 const REPORT_INTERVAL_MS = 60_000;
 const DISCOVERY_INTERVAL_MS = 60_000;
 const RETRY_DELAYS_MS = [10_000, 20_000, 30_000];
@@ -132,7 +131,7 @@ async function listRemoteFiles() {
     await sleep(DIRECTORY_LIST_DELAY_MS);
     const entries = await client.getDirectoryContents(directory);
     for (const entry of entries) {
-      console.log(entry);
+      log(`directory contents for ${directory}: ${entries.length} entries`);
       const remotePath = getEntryPath(entry);
       if (entry.type === "directory") {
         directories.push(remotePath.endsWith("/") ? remotePath : `${remotePath}/`);
@@ -180,6 +179,7 @@ async function discoverRemoteFiles() {
           nextRetryAt: null,
         };
         mainQueue.push(remotePath);
+        await persistState();
       } else if (metadataChanged(previous, remoteFile)) {
         if (previous.status === "downloading") continue;
         Object.assign(previous, remoteFile, {
@@ -188,15 +188,23 @@ async function discoverRemoteFiles() {
           nextRetryAt: null,
         });
         mainQueue.push(remotePath);
+        await persistState();
       } else {
-        Object.assign(previous, remoteFile);
+        const hasMetadataChanges = Object.entries(remoteFile)
+          .some(([key, value]) => previous[key] !== value);
+        if (hasMetadataChanges) {
+          Object.assign(previous, remoteFile);
+          await persistState();
+        }
       }
     }
 
     for (const remotePath of Object.keys(state.files)) {
-      if (!seen.has(remotePath)) delete state.files[remotePath];
+      if (!seen.has(remotePath)) {
+        delete state.files[remotePath];
+        await persistState();
+      }
     }
-    await persistState();
     log(`Обнаружено файлов: ${remoteFiles.length}`);
   } catch (error) {
     log(`Ошибка сканирования WebDAV: ${error.message}`);
@@ -235,6 +243,7 @@ async function downloadFile(remotePath) {
   if (!file) return;
 
   file.status = "downloading";
+  await persistState();
   try {
     const destination = localPathFor(remotePath);
     await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -254,6 +263,7 @@ async function downloadFile(remotePath) {
         file.integrityFailures = (file.integrityFailures || 0) + 1;
         file.nextRetryAt = null;
         mainQueue.push(remotePath);
+        await persistState();
         log(`MD5 не совпал для ${remotePath}: ожидался ${expectedMd5}, получен ${actualMd5}. Файл поставлен в очередь на скачивание.`);
         return;
       }
@@ -264,6 +274,7 @@ async function downloadFile(remotePath) {
     file.status = "completed";
     file.downloadedAt = new Date().toISOString();
     file.nextRetryAt = null;
+    await persistState();
     log(`Скачан: ${remotePath}`);
   } catch (error) {
     file.status = "error";
@@ -275,6 +286,7 @@ async function downloadFile(remotePath) {
       retryQueue.push(remotePath);
       queuedRetries.add(remotePath);
     }
+    await persistState();
     log(`Ошибка ${remotePath}: ${error.message}. Повтор через ${delay / 1000} сек.`);
   }
 }
@@ -425,7 +437,6 @@ async function start() {
   await discoverRemoteFiles();
   await writeReport().catch((error) => log(`Ошибка создания отчёта: ${error.message}`));
 
-  const saveTimer = setInterval(() => void persistState(), STATE_SAVE_INTERVAL_MS);
   runningTasks = [
     ...Array.from({ length: WORKER_COUNT }, () => mainWorker()),
     retryWorker(),
@@ -434,7 +445,6 @@ async function start() {
   ];
 
   const stop = async () => {
-    clearInterval(saveTimer);
     await shutdown();
   };
   process.once("SIGINT", stop);
