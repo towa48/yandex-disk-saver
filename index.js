@@ -327,7 +327,8 @@ function escapeHtml(value) {
 }
 
 function formatBytes(bytes) {
-  return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(bytes)} Б`;
+  const megabytes = bytes / (1024 * 1024);
+  return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(megabytes)} МБ`;
 }
 
 async function writeReport() {
