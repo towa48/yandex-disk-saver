@@ -17,6 +17,7 @@ const FILE_STATUS = Object.freeze({
 const DIRECTORY_LIST_DELAY_MS = 1000;
 const REPORT_INTERVAL_MS = 30_000;
 const RETRY_DELAYS_MS = [10_000, 20_000, 30_000];
+const MAX_RETRIES = 10;
 
 function readConfig() {
   const protocol = (process.env.WEBDAV_PROTOCOL || "http").replace(/:$/, "");
@@ -185,6 +186,9 @@ async function listRemoteFiles(remotePath, onFile) {
     ? folder.children.map(path => ({ type: "directory", filename: path })) // only folders
     : await getDirectoryContentsWithRecovery(folder.path);
 
+  folder.status = FILE_STATUS.DOWNLOADING;
+  state.folders[remotePath] = folder;
+
   log(`directory contents for ${folder.path}: ${entries.length} entries`);
 
   for (const entry of entries) {
@@ -204,12 +208,14 @@ async function listRemoteFiles(remotePath, onFile) {
     }
   }
 
+  await persistState();
+
   for (const child of folder.children) {
     await listRemoteFiles(child, onFile);
   }
 
   folder.status = FILE_STATUS.COMPLETED;
-  state.folders[remotePath] = folder;
+  await persistState();
 }
 
 function metadataChanged(previous, remoteFile) {
@@ -405,7 +411,7 @@ async function retryWorker() {
     const now = Date.now();
 
     const dueRetry = errorQueue.find(([, file]) =>
-      file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now);
+      file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now && file.attempts <= MAX_RETRIES);
 
     if (dueRetry) {
       const file = dueRetry[1];
