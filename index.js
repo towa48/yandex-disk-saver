@@ -116,6 +116,9 @@ async function loadState() {
       state.files = saved.files;
       state.version = saved.version || 1;
     }
+    if (saved && saved.folders && typeof saved.folders === "object") {
+      state.folders = saved.folders;
+    }
   } catch (error) {
     if (error.code !== "ENOENT") {
       log(`Не удалось загрузить состояние: ${error.message}. Будет создано новое.`, 'error');
@@ -201,9 +204,17 @@ async function listRemoteFiles(remotePath, onFile) {
     children: []
   };
 
+  //if (state.folders[remotePath]) {
+  //  log(`Folder ${remotePath} already exists in state with status ${folder.status}.`, 'info');
+  //}
+
   if (folder.status === FILE_STATUS.COMPLETED) return;
 
-  await sleep(DIRECTORY_LIST_DELAY_MS);
+  // Await only if server request needed
+  if (folder.status != FILE_STATUS.DOWNLOADING) {
+    await sleep(DIRECTORY_LIST_DELAY_MS);
+  }
+
   const entries = folder.status == FILE_STATUS.DOWNLOADING
     ? folder.children.map(path => ({ type: "directory", filename: path })) // only folders
     : await getDirectoryContentsWithRecovery(folder.path);
