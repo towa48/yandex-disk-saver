@@ -108,7 +108,7 @@ async function loadState() {
     if (file.status === FILE_STATUS.PENDING) {
       mainQueue.push(remotePath);
     } else if (file.status === FILE_STATUS.ERROR) {
-      errorQueue.push(remotePath);
+      errorQueue.push(file);
     }
   }
 
@@ -297,16 +297,19 @@ function retryDelay(attempts) {
   return RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)];
 }
 
-async function downloadFile(remotePath) {
+async function downloadFile(remotePath, timeout) {
   const file = state.files[remotePath];
   if (!file) return;
+
+  const timeout2 = timeout || 60_000;
+  log(`Начало скачивания: ${remotePath}. Таймаут: ${(timeout2/1000).toFixed(2)} сек.`);
 
   file.status = FILE_STATUS.DOWNLOADING;
   await persistState();
   try {
     const destination = localPathFor(remotePath);
     await fs.mkdir(path.dirname(destination), { recursive: true });
-    const contents = await client.getFileContents(remotePath, { format: "binary" });
+    const contents = await client.getFileContents(remotePath, { format: "binary", timeout: timeout2 });
     const buffer = Buffer.from(contents);
     const temporaryPath = `${destination}.part`;
     await fs.writeFile(temporaryPath, buffer);
@@ -350,13 +353,36 @@ async function downloadFile(remotePath) {
   }
 }
 
+function calculateDownloadTimeout(fileSizeInBytes) {
+  if (!fileSizeInBytes) {
+    return null;
+  }
+
+  const minSpeedMbps = 2;
+  const extraReserveMs = 5000;
+
+  // 1. Translate from Mbps to bytes per second:
+  // (Mbps * 1024 * 1024) / 8 bits = bytes per second
+  const speedBytesPerSecond = (minSpeedMbps * 1024 * 1024) / 8;
+
+  // 2. Calculate the pure download time in seconds:
+  const downloadTimeSeconds = fileSizeInBytes / speedBytesPerSecond;
+
+  // 3. Convert to milliseconds and add extra reserve for lags/connection:
+  const timeoutMs = (downloadTimeSeconds * 1000) + extraReserveMs;
+
+  return Math.round(timeoutMs);
+}
+
 async function mainWorker() {
   mainWorkerRunning = true;
   while (!stopping && (mainQueue.length > 0 || discoveryRunning)) {
     const remotePath = mainQueue.shift();
     if (remotePath) {
-      if (state.files[remotePath]?.status === FILE_STATUS.PENDING) {
-        await downloadFile(remotePath);
+      const file = state.files[remotePath];
+      if (file?.status === FILE_STATUS.PENDING) {
+        const timeout = calculateDownloadTimeout(file?.size);
+        await downloadFile(remotePath, timeout);
       }
       continue;
     }
@@ -364,6 +390,7 @@ async function mainWorker() {
     await sleep(250);
   }
   mainWorkerRunning = false;
+  log(`Main worker stopped. Error queue length: ${errorQueue.length}`);
 }
 
 async function retryWorker() {
@@ -374,13 +401,16 @@ async function retryWorker() {
       file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now);
 
     if (dueRetry) {
-      await downloadFile(dueRetry[0]);
+      const file = dueRetry[1];
+      const timeout = calculateDownloadTimeout(file?.size);
+      await downloadFile(dueRetry[0], timeout);
       continue;
     }
 
     const waitTime = 1_000;
     await sleep(waitTime);
   }
+  log(`Retry worker stopped. Error queue length: ${errorQueue.length}`);
 }
 
 function escapeHtml(value) {
