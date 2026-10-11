@@ -7,8 +7,8 @@ const { createClient } = require("webdav");
 const { loadavg } = require("node:os");
 require("dotenv").config();
 
-const DIRECTORY_LIST_DELAY_MS = 500;
-const REPORT_INTERVAL_MS = 60_000;
+const DIRECTORY_LIST_DELAY_MS = 1000;
+const REPORT_INTERVAL_MS = 30_000;
 const DISCOVERY_INTERVAL_MS = 60_000;
 const RETRY_DELAYS_MS = [10_000, 20_000, 30_000];
 
@@ -40,10 +40,15 @@ function readConfig() {
 }
 
 const config = readConfig();
-const client = createClient(config.url, {
-  username: config.username,
-  password: config.password,
-});
+
+function createWebDavClient() {
+  return createClient(config.url, {
+    username: config.username,
+    password: config.password,
+  });
+}
+
+let client = createWebDavClient();
 
 const state = { version: 1, files: {} };
 let stopping = false;
@@ -66,6 +71,10 @@ function sleep(milliseconds) {
 
 function log(message) {
   console.log(`[${new Date().toISOString()}] ${message}`);
+}
+
+function isRateLimitError(error) {
+  return error?.status === 429 || error?.response?.status === 429;
 }
 
 async function loadState() {
@@ -112,6 +121,31 @@ function getEntryPath(entry) {
   return path.posix.join(config.remotePath, entry.basename);
 }
 
+async function checkWebDavConnection() {
+  try {
+    await client.getDirectoryContents(config.remotePath);
+    log("Проверка WebDAV: соединение доступно.");
+    return true;
+  } catch (checkError) {
+    if (isRateLimitError(checkError)) {
+      log("Проверка WebDAV получила HTTP 429; клиент не пересоздаётся.");
+      return false;
+    }
+
+    log(`Проверка WebDAV не прошла: ${checkError.message}. Пересоздаю клиент.`);
+    client = createWebDavClient();
+
+    try {
+      await client.getDirectoryContents(config.remotePath);
+      log("Соединение WebDAV восстановлено.");
+      return true;
+    } catch (reconnectError) {
+      log(`Не удалось восстановить соединение WebDAV: ${reconnectError.message}`);
+      return false;
+    }
+  }
+}
+
 async function listRemoteFiles(onFile) {
   const files = [];
   const directories = [config.remotePath];
@@ -155,9 +189,10 @@ function metadataChanged(previous, remoteFile) {
   return Boolean(previous.lastmod && remoteFile.lastmod && previous.lastmod !== remoteFile.lastmod);
 }
 
-async function discoverRemoteFiles() {
+async function discoverRemoteFiles(isRecoveryRetry = false) {
   if (discoveryRunning || stopping) return;
   discoveryRunning = true;
+  let retryAfterConnectionCheck = false;
   try {
     const seen = new Set();
 
@@ -205,8 +240,18 @@ async function discoverRemoteFiles() {
     log(`Обнаружено файлов: ${remoteFiles.length}`);
   } catch (error) {
     log(`Ошибка сканирования WebDAV: ${error.message}`);
+    if (isRateLimitError(error)) {
+      log("Получен HTTP 429; пропускаю проверку соединения и не пересоздаю клиент.");
+    } else {
+      retryAfterConnectionCheck = await checkWebDavConnection() && !isRecoveryRetry;
+    }
   } finally {
     discoveryRunning = false;
+  }
+
+  if (retryAfterConnectionCheck && !stopping) {
+    log("Повторяю сканирование WebDAV после проверки подключения.");
+    await discoverRemoteFiles(true);
   }
 }
 
