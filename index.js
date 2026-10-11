@@ -59,8 +59,10 @@ let client = createWebDavClient();
 const state = { version: 1, files: {} };
 let stopping = false;
 let saveChain = Promise.resolve();
+let mainWorkerRunning = false;
 let discoveryRunning = false;
 const mainQueue = [];
+const errorQueue = [];
 const waiters = new Set();
 
 function sleep(milliseconds) {
@@ -105,6 +107,8 @@ async function loadState() {
     }
     if (file.status === FILE_STATUS.PENDING) {
       mainQueue.push(remotePath);
+    } else if (file.status === FILE_STATUS.ERROR) {
+      errorQueue.push(remotePath);
     }
   }
 
@@ -324,6 +328,13 @@ async function downloadFile(remotePath) {
     file.status = FILE_STATUS.COMPLETED;
     file.downloadedAt = new Date().toISOString();
     file.nextRetryAt = null;
+
+    // remove entry from errorQueue if it exists
+    const errorIndex = errorQueue.indexOf(file);
+    if (errorIndex !== -1) {
+      errorQueue.splice(errorIndex, 1);
+    }
+
     await persistState();
     log(`Скачан: ${remotePath}`);
   } catch (error) {
@@ -332,12 +343,15 @@ async function downloadFile(remotePath) {
     const delay = retryDelay(file.attempts);
     file.nextRetryAt = Date.now() + delay;
 
+    errorQueue.push(file);
+
     await persistState();
     log(`Ошибка ${remotePath}: ${error.message}. Повтор через ${delay / 1000} сек.`);
   }
 }
 
 async function mainWorker() {
+  mainWorkerRunning = true;
   while (!stopping && (mainQueue.length > 0 || discoveryRunning)) {
     const remotePath = mainQueue.shift();
     if (remotePath) {
@@ -349,12 +363,14 @@ async function mainWorker() {
 
     await sleep(250);
   }
+  mainWorkerRunning = false;
 }
 
 async function retryWorker() {
-  while (!stopping && (mainQueue.length > 0 || discoveryRunning)) {
+  while (!stopping && (errorQueue.length > 0 || mainWorkerRunning || discoveryRunning)) {
     const now = Date.now();
-    const dueRetry = Object.entries(state.files).find(([, file]) =>
+
+    const dueRetry = errorQueue.find(([, file]) =>
       file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now);
 
     if (dueRetry) {
@@ -362,14 +378,7 @@ async function retryWorker() {
       continue;
     }
 
-    const nextRetryAt = Object.values(state.files).reduce((earliest, file) => {
-      return file.status === FILE_STATUS.ERROR
-        ? Math.min(earliest, file.nextRetryAt || 0)
-        : earliest;
-    }, Infinity);
-    const waitTime = Number.isFinite(nextRetryAt)
-      ? Math.min(1_000, Math.max(1, nextRetryAt - Date.now()))
-      : 1_000;
+    const waitTime = 1_000;
     await sleep(waitTime);
   }
 }
