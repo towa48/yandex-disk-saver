@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { createClient } = require("webdav");
+const { loadavg } = require("node:os");
 require("dotenv").config();
 
 const DIRECTORY_LIST_DELAY_MS = 500;
@@ -180,6 +181,8 @@ async function discoverRemoteFiles() {
         };
         mainQueue.push(remotePath);
         await persistState();
+      } else if (previous.status === "completed") {
+        return;
       } else if (metadataChanged(previous, remoteFile)) {
         if (previous.status === "downloading") return;
         Object.assign(previous, remoteFile, {
@@ -200,7 +203,7 @@ async function discoverRemoteFiles() {
     });
 
     for (const remotePath of Object.keys(state.files)) {
-      if (!seen.has(remotePath)) {
+      if (!seen.has(remotePath) && state.files[remotePath].status !== "completed") {
         delete state.files[remotePath];
         await persistState();
       }
@@ -259,13 +262,8 @@ async function downloadFile(remotePath) {
       if (actualMd5 !== expectedMd5) {
         await fs.rm(temporaryPath, { force: true });
         await fs.rm(destination, { force: true });
-        file.status = "pending";
         file.integrityFailures = (file.integrityFailures || 0) + 1;
-        file.nextRetryAt = null;
-        mainQueue.push(remotePath);
-        await persistState();
-        log(`MD5 не совпал для ${remotePath}: ожидался ${expectedMd5}, получен ${actualMd5}. Файл поставлен в очередь на скачивание.`);
-        return;
+        throw new Error(`MD5 не совпал: ожидался ${expectedMd5}, получен ${actualMd5}. Системная нагрузка: ${loadavg().join(", ")}`);
       }
     }
 
