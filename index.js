@@ -329,11 +329,8 @@ async function discoverRemoteFiles() {
   if (discoveryRunning || stopping) return;
   discoveryRunning = true;
   try {
-    const seen = new Set();
-
     await listRemoteFiles(config.remotePath, (remoteFile) => withStateLock(async () => {
       const { remotePath } = remoteFile;
-      seen.add(remotePath);
       const previous = state.files[remotePath];
 
       if (!previous) {
@@ -358,17 +355,6 @@ async function discoverRemoteFiles() {
         Object.assign(previous, remoteFile);
       }
     }));
-
-    await withStateLock(async () => {
-      let removed = false;
-      for (const remotePath of Object.keys(state.files)) {
-        if (!seen.has(remotePath) && state.files[remotePath].status !== FILE_STATUS.COMPLETED) {
-          delete state.files[remotePath];
-          removed = true;
-        }
-      }
-      if (removed) await writeStateFile();
-    });
   } catch (error) {
     log(`Ошибка сканирования WebDAV: ${error.message}`, 'error');
     if (isRateLimitError(error)) {
@@ -502,7 +488,7 @@ async function mainWorker() {
     await sleep(250);
   }
   mainWorkerRunning = false;
-  log(`=> Main worker stopped. Error queue length: ${errorQueue.length}`, 'info');
+  log(`=> Main worker stopped. Error queue length: ${errorQueue.length}.`, 'info');
 }
 
 async function retryWorker() {
