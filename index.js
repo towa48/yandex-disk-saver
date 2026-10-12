@@ -159,7 +159,7 @@ async function loadState() {
     }
   });
 
-  log(`Состояние загружено. ${mainQueue.length} файлов в очереди.`, 'info');
+  log(`Состояние загружено. ${mainQueue.length} файлов в основной очереди и ${errorQueue.length} в очереди ошибок.`, 'info');
 }
 
 // Mutex for `state`: tasks run strictly one after another; a task must not call these helpers itself.
@@ -477,6 +477,8 @@ async function mainWorker() {
   while (!stopping && (mainQueue.length > 0 || discoveryRunning)) {
     const remotePath = mainQueue.shift();
     if (remotePath) {
+      log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Processing file: ${remotePath}. Main queue length: ${mainQueue.length}.`, 'info');
+
       const file = state.files[remotePath];
       if (file?.status === FILE_STATUS.PENDING) {
         const timeout = calculateDownloadTimeout(file?.size);
@@ -488,7 +490,7 @@ async function mainWorker() {
     await sleep(250);
   }
   mainWorkerRunning = false;
-  log(`=> Main worker stopped. Error queue length: ${errorQueue.length}.`, 'info');
+  log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueue.length}.`, 'info');
 }
 
 async function retryWorker() {
@@ -499,6 +501,7 @@ async function retryWorker() {
       file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now && file.attempts <= MAX_FILE_RETRIES);
 
     if (dueRetry) {
+      log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Processing file: ${dueRetry.remotePath}. Error queue length: ${errorQueue.length}.`, 'info');
       const file = dueRetry;
       const timeout = calculateDownloadTimeout(file?.size);
       await downloadFile(dueRetry.remotePath, timeout);
@@ -511,7 +514,7 @@ async function retryWorker() {
     // wait for the queue
     await sleep(1000);
   }
-  log(`=> Retry worker stopped. Error queue length: ${errorQueue.length}`, 'info');
+  log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueue.length}.`, 'info');
 }
 
 function escapeHtml(value) {
