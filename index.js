@@ -65,7 +65,7 @@ var client = createWebDavClient();
 
 const state = { version: 1, files: {}, folders: {} };
 let stopping = false;
-let saveChain = Promise.resolve();
+let stateLock = Promise.resolve();
 let mainWorkerRunning = false;
 let discoveryRunning = false;
 const mainQueue = [];
@@ -112,13 +112,15 @@ async function loadState() {
   log(`Загружаем состояние...`, 'trace');
   try {
     const saved = JSON.parse(await fs.readFile(config.statePath, "utf8"));
-    if (saved && saved.files && typeof saved.files === "object") {
-      state.files = saved.files;
-      state.version = saved.version || 1;
-    }
-    if (saved && saved.folders && typeof saved.folders === "object") {
-      state.folders = saved.folders;
-    }
+    await withStateLock(() => {
+      if (saved && saved.files && typeof saved.files === "object") {
+        state.files = saved.files;
+        state.version = saved.version || 1;
+      }
+      if (saved && saved.folders && typeof saved.folders === "object") {
+        state.folders = saved.folders;
+      }
+    });
   } catch (error) {
     if (error.code !== "ENOENT") {
       log(`Не удалось загрузить состояние: ${error.message}. Будет создано новое.`, 'error');
@@ -127,30 +129,53 @@ async function loadState() {
 
   log(`Формируем очередь загрузки...`, 'trace');
 
-  for (const [remotePath, file] of Object.entries(state.files)) {
-    if (file.status === FILE_STATUS.DOWNLOADING) {
-      file.status = FILE_STATUS.PENDING;
+  await withStateLock(() => {
+    for (const [remotePath, file] of Object.entries(state.files)) {
+      if (file.status === FILE_STATUS.DOWNLOADING) {
+        file.status = FILE_STATUS.PENDING;
+      }
+      if (file.status === FILE_STATUS.PENDING) {
+        mainQueue.push(remotePath);
+      } else if (file.status === FILE_STATUS.ERROR) {
+        errorQueue.push(file);
+      }
     }
-    if (file.status === FILE_STATUS.PENDING) {
-      mainQueue.push(remotePath);
-    } else if (file.status === FILE_STATUS.ERROR) {
-      errorQueue.push(file);
-    }
-  }
+  });
 
   log(`Состояние загружено. ${mainQueue.length} файлов в очереди.`, 'info');
 }
 
+// Mutex for `state`: tasks run strictly one after another; a task must not call these helpers itself.
+function withStateLock(task) {
+  const result = stateLock.then(task);
+  stateLock = result.catch(() => {});
+  return result;
+}
+
+// Serializes and writes state.json; call only while holding the lock.
+async function writeStateFile() {
+  try {
+    const snapshot = JSON.stringify(state, null, 2);
+    await fs.mkdir(path.dirname(config.statePath), { recursive: true });
+    const temporaryPath = `${config.statePath}.tmp`;
+    await fs.writeFile(temporaryPath, snapshot, "utf8");
+    await fs.rename(temporaryPath, config.statePath);
+  } catch (error) {
+    log(`Не удалось сохранить состояние: ${error.message}`, 'error');
+  }
+}
+
 function persistState() {
-  var snapshot = JSON.stringify(state, null, 2);
-  saveChain = saveChain
-    .catch(e => log(`Не удалось сохранить состояние: ${e.message}`, 'error'))
-    .then(async () => {
-      await fs.mkdir(path.dirname(config.statePath), { recursive: true });
-      await fs.writeFile(config.statePath, snapshot, "utf8");
-    })
-    .catch((error) => log(`Не удалось сохранить состояние: ${error.message}`, 'error'));
-  return saveChain;
+  return withStateLock(writeStateFile);
+}
+
+// Applies `mutate` and saves the result in one locked step.
+function updateState(mutate) {
+  return withStateLock(async () => {
+    const result = mutate();
+    await writeStateFile();
+    return result;
+  });
 }
 
 function getEntryPath(entry) {
@@ -205,7 +230,7 @@ async function listRemoteFiles(remotePath, onFile) {
   };
 
   //if (state.folders[remotePath]) {
-  //  log(`Folder ${remotePath} already exists in state with status ${folder.status}.`, 'info');
+  //  log(`Folder ${remotePath} already exists in state with status '${folder.status}'.`, 'trace');
   //}
 
   if (folder.status === FILE_STATUS.COMPLETED) return;
@@ -219,36 +244,53 @@ async function listRemoteFiles(remotePath, onFile) {
     ? folder.children.map(path => ({ type: "directory", filename: path })) // only folders
     : await getDirectoryContentsWithRecovery(folder.path);
 
-  folder.status = FILE_STATUS.DOWNLOADING;
-  state.folders[remotePath] = folder;
+  await withStateLock(() => {
+    folder.status = FILE_STATUS.DOWNLOADING;
+    state.folders[remotePath] = folder;
+  });
 
   log(`directory contents for ${folder.path}: ${entries.length} entries`, 'info');
 
-  for (const entry of entries) {
+  const childrenFolders = entries.filter(entry => entry.type === "directory").map(entry => {
     const remotePath = getEntryPath(entry);
-    if (entry.type === "directory") {
-      const childrenPath = remotePath.endsWith("/") ? remotePath : `${remotePath}/`;
-      folder.children.push(childrenPath);
-    } else if (entry.type === "file") {
-      const parsedSize = Number(entry.size);
-      const remoteFile = {
+    return remotePath.endsWith("/") ? remotePath : `${remotePath}/`;
+  });
+
+  const childrenFiles = entries.filter(entry => entry.type === "file").map(entry => {
+    const remotePath = getEntryPath(entry);
+    const parsedSize = Number(entry.size);
+    const remoteFile = {
         remotePath,
         size: Number.isFinite(parsedSize) && parsedSize >= 0 ? parsedSize : null,
         etag: entry.etag || null,
         lastmod: entry.lastmod || null,
       };
-      await onFile(remoteFile);
+    return remoteFile;
+  });
+
+  log(`children folders for ${folder.path}: ${childrenFolders.length} entries`, 'trace');
+
+  await updateState(() => {
+    for (const child of childrenFolders) {
+      if (!folder.children.includes(child)) folder.children.push(child);
     }
+    log(`children updated for ${folder.path}`, 'trace');
+  });
+
+  log(`process files of ${folder.path}`, 'trace');
+  for (const file of childrenFiles) {
+    await onFile(file);
   }
 
-  await persistState();
-
   for (const child of folder.children) {
+    log(`process next child for ${folder.path}: ${child}`, 'trace');
     await listRemoteFiles(child, onFile);
   }
 
-  folder.status = FILE_STATUS.COMPLETED;
-  await persistState();
+  await updateState(() => {
+    folder.status = FILE_STATUS.COMPLETED;
+    log(`status completed for ${folder.path}`, 'trace');
+  });
 }
 
 function metadataChanged(previous, remoteFile) {
@@ -266,10 +308,11 @@ async function discoverRemoteFiles() {
   try {
     const seen = new Set();
 
-    await listRemoteFiles(config.remotePath, async (remoteFile) => {
+    await listRemoteFiles(config.remotePath, (remoteFile) => withStateLock(async () => {
       const { remotePath } = remoteFile;
       seen.add(remotePath);
       const previous = state.files[remotePath];
+      let changed = false;
 
       if (!previous) {
         state.files[remotePath] = {
@@ -279,7 +322,7 @@ async function discoverRemoteFiles() {
           nextRetryAt: null,
         };
         mainQueue.push(remotePath);
-        await persistState();
+        changed = true;
       } else if (previous.status === FILE_STATUS.COMPLETED) {
         return;
       } else if (metadataChanged(previous, remoteFile)) {
@@ -290,23 +333,25 @@ async function discoverRemoteFiles() {
           nextRetryAt: null,
         });
         mainQueue.push(remotePath);
-        await persistState();
-      } else {
-        const hasMetadataChanges = Object.entries(remoteFile)
-          .some(([key, value]) => previous[key] !== value);
-        if (hasMetadataChanges) {
-          Object.assign(previous, remoteFile);
-          await persistState();
+        changed = true;
+      } else if (Object.entries(remoteFile).some(([key, value]) => previous[key] !== value)) {
+        Object.assign(previous, remoteFile);
+        changed = true;
+      }
+
+      if (changed) await writeStateFile();
+    }));
+
+    await withStateLock(async () => {
+      let removed = false;
+      for (const remotePath of Object.keys(state.files)) {
+        if (!seen.has(remotePath) && state.files[remotePath].status !== FILE_STATUS.COMPLETED) {
+          delete state.files[remotePath];
+          removed = true;
         }
       }
+      if (removed) await writeStateFile();
     });
-
-    for (const remotePath of Object.keys(state.files)) {
-      if (!seen.has(remotePath) && state.files[remotePath].status !== FILE_STATUS.COMPLETED) {
-        delete state.files[remotePath];
-        await persistState();
-      }
-    }
   } catch (error) {
     log(`Ошибка сканирования WebDAV: ${error.message}`, 'error');
     if (isRateLimitError(error)) {
@@ -350,8 +395,9 @@ async function downloadFile(remotePath, timeout) {
   const timeout2 = timeout || 60_000;
   log(`Начало скачивания: ${remotePath}. Таймаут: ${(timeout2/1000).toFixed(2)} сек.`, 'trace');
 
-  file.status = FILE_STATUS.DOWNLOADING;
-  await persistState();
+  await updateState(() => {
+    file.status = FILE_STATUS.DOWNLOADING;
+  });
   try {
     const destination = localPathFor(remotePath);
     await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -367,34 +413,37 @@ async function downloadFile(remotePath, timeout) {
       if (actualMd5 !== expectedMd5) {
         await fs.rm(temporaryPath, { force: true });
         await fs.rm(destination, { force: true });
-        file.integrityFailures = (file.integrityFailures || 0) + 1;
+        await withStateLock(() => {
+          file.integrityFailures = (file.integrityFailures || 0) + 1;
+        });
         throw new Error(`MD5 не совпал: ожидался ${expectedMd5}, получен ${actualMd5}. Системная нагрузка: ${loadavg().join(", ")}`);
       }
     }
 
     await fs.rename(temporaryPath, destination);
 
-    file.status = FILE_STATUS.COMPLETED;
-    file.downloadedAt = new Date().toISOString();
-    file.nextRetryAt = null;
+    await updateState(() => {
+      file.status = FILE_STATUS.COMPLETED;
+      file.downloadedAt = new Date().toISOString();
+      file.nextRetryAt = null;
 
-    // remove entry from errorQueue if it exists
-    const errorIndex = errorQueue.indexOf(file);
-    if (errorIndex !== -1) {
-      errorQueue.splice(errorIndex, 1);
-    }
-
-    await persistState();
+      // remove entry from errorQueue if it exists
+      const errorIndex = errorQueue.indexOf(file);
+      if (errorIndex !== -1) {
+        errorQueue.splice(errorIndex, 1);
+      }
+    });
     log(`Скачан: ${remotePath}`, 'trace');
   } catch (error) {
-    file.status = FILE_STATUS.ERROR;
-    file.attempts = (file.attempts || 0) + 1;
-    const delay = retryDelay(file.attempts);
-    file.nextRetryAt = Date.now() + delay;
+    const delay = await updateState(() => {
+      file.status = FILE_STATUS.ERROR;
+      file.attempts = (file.attempts || 0) + 1;
+      const retryAfter = retryDelay(file.attempts);
+      file.nextRetryAt = Date.now() + retryAfter;
 
-    errorQueue.push(file);
-
-    await persistState();
+      if (!errorQueue.includes(file)) errorQueue.push(file);
+      return retryAfter;
+    });
     log(`Ошибка ${remotePath}: ${error.message}. Повтор через ${delay / 1000} сек.`, 'error');
   }
 }
@@ -443,13 +492,13 @@ async function retryWorker() {
   while (!stopping && (errorQueue.length > 0 || mainWorkerRunning || discoveryRunning)) {
     const now = Date.now();
 
-    const dueRetry = errorQueue.find(([, file]) =>
+    const dueRetry = errorQueue.find((file) =>
       file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now && file.attempts <= MAX_RETRIES);
 
     if (dueRetry) {
-      const file = dueRetry[1];
+      const file = dueRetry;
       const timeout = calculateDownloadTimeout(file?.size);
-      await downloadFile(dueRetry[0], timeout);
+      await downloadFile(dueRetry.remotePath, timeout);
 
       // wait to the next entity
       await sleep(250);

@@ -3,3 +3,4 @@ node_modules/
 downloads/
 state.json
 state.json.tmp
+*.zip
