@@ -17,7 +17,7 @@ const FILE_STATUS = Object.freeze({
 const DIRECTORY_LIST_DELAY_MS = 1000;
 const REPORT_INTERVAL_MS = 30_000;
 const RETRY_DELAYS_MS = [10_000, 20_000, 30_000];
-const MAX_RETRIES = 10;
+const MAX_FILE_RETRIES = 3;
 
 const YELLOW_COLOR = "\x1b[33m";
 const RESET_COLOR = "\x1b[0m";
@@ -118,7 +118,24 @@ async function loadState() {
         state.version = saved.version || 1;
       }
       if (saved && saved.folders && typeof saved.folders === "object") {
-        state.folders = saved.folders;
+        // hash
+        const folders = saved.folders;
+
+        // fix duplicate folder entries
+        for(const path in folders) {
+          const entry = folders[path];
+          const children = entry.children || [];
+
+          const unique = {};
+          for (const folderPath of children) {
+            if (!unique[folderPath]) {
+              unique[folderPath] = true;
+            }
+          }
+
+          entry.children = Object.keys(unique).sort();
+          state.folders = folders;
+        }
       }
     });
   } catch (error) {
@@ -493,7 +510,7 @@ async function retryWorker() {
     const now = Date.now();
 
     const dueRetry = errorQueue.find((file) =>
-      file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now && file.attempts <= MAX_RETRIES);
+      file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now && file.attempts <= MAX_FILE_RETRIES);
 
     if (dueRetry) {
       const file = dueRetry;
