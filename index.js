@@ -62,6 +62,24 @@ function createWebDavClient() {
 }
 
 var client = createWebDavClient();
+let webDavClientLock = Promise.resolve();
+
+function withWebDavClientLock(task) {
+  const result = webDavClientLock.then(task);
+  webDavClientLock = result.catch(() => {});
+  return result;
+}
+
+function getWebDavClient() {
+  return withWebDavClientLock(() => client);
+}
+
+function recreateWebDavClient() {
+  return withWebDavClientLock(() => {
+    client = createWebDavClient();
+    return client;
+  });
+}
 
 const state = { version: 1, files: {}, folders: {} };
 let stopping = false;
@@ -262,7 +280,8 @@ function getEntryPath(entry) {
 
 async function getDirectoryContentsWithRecovery(directory) {
   try {
-    return await client.getDirectoryContents(directory);
+    const webDavClient = await getWebDavClient();
+    return await webDavClient.getDirectoryContents(directory);
   } catch (requestError) {
     if (isRateLimitError(requestError)) {
         await sleep(DIRECTORY_LIST_DELAY_MS);
@@ -271,7 +290,8 @@ async function getDirectoryContentsWithRecovery(directory) {
 
     log(`Ошибка запроса каталога ${directory}: ${requestError.message}. Проверяю подключение к этому же каталогу.`, 'error');
     try {
-      const entries = await client.getDirectoryContents(directory);
+      const webDavClient = await getWebDavClient();
+      const entries = await webDavClient.getDirectoryContents(directory);
       log(`Подключение WebDAV доступно; продолжаю с каталога ${directory}.`, 'info');
       return entries;
     } catch (checkError) {
@@ -281,10 +301,11 @@ async function getDirectoryContentsWithRecovery(directory) {
       }
 
       log(`Каталог ${directory} недоступен: ${checkError.message}. Пересоздаю клиент.`, 'error');
-      client = createWebDavClient();
+      await recreateWebDavClient();
 
       try {
-        const entries = await client.getDirectoryContents(directory);
+        const webDavClient = await getWebDavClient();
+        const entries = await webDavClient.getDirectoryContents(directory);
         log(`Подключение восстановлено; продолжаю с каталога ${directory}.`, 'info');
         return entries;
       } catch (reconnectError) {
@@ -460,7 +481,8 @@ async function downloadFile(remotePath, timeout) {
   try {
     const destination = localPathFor(remotePath);
     await fs.mkdir(path.dirname(destination), { recursive: true });
-    const contents = await client.getFileContents(remotePath, { format: "binary", timeout: timeout2 });
+    const webDavClient = await getWebDavClient();
+    const contents = await webDavClient.getFileContents(remotePath, { format: "binary", timeout: timeout2 });
     const buffer = Buffer.from(contents);
     const temporaryPath = `${destination}.part`;
     await fs.writeFile(temporaryPath, buffer);
@@ -505,11 +527,12 @@ async function downloadFile(remotePath, timeout) {
       log(`Проверяю состояние клиента`, 'warn');
       try
       {
-        const _ = await client.getDirectoryContents(config.remotePath);
+        const webDavClient = await getWebDavClient();
+        const _ = await webDavClient.getDirectoryContents(config.remotePath);
         log(`Соединение присутствует.`, 'info');
       } catch (err) {
         log(`Пересоздаю клиента`, 'warn');
-        client = createNewClient();
+        await recreateWebDavClient();
       }
     }
 
