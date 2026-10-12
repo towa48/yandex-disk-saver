@@ -69,7 +69,9 @@ let stateLock = Promise.resolve();
 let mainWorkerRunning = false;
 let discoveryRunning = false;
 const mainQueue = [];
+let mainQueueLock = Promise.resolve();
 const errorQueue = [];
+let errorQueueLock = Promise.resolve();
 const waiters = new Set();
 
 function sleep(milliseconds) {
@@ -82,6 +84,58 @@ function sleep(milliseconds) {
     const timer = setTimeout(finish, milliseconds);
     waiters.add(finish);
   });
+}
+
+function withMainQueueLock(task) {
+  const result = mainQueueLock.then(task);
+  mainQueueLock = result.catch(() => {});
+  return result;
+}
+
+function enqueueMainQueue(remotePath) {
+  return withMainQueueLock(() => mainQueue.push(remotePath));
+}
+
+function dequeueMainQueueItem() {
+  return withMainQueueLock(() => ({
+    remotePath: mainQueue.shift(),
+    length: mainQueue.length,
+  }));
+}
+
+function getMainQueueLength() {
+  return withMainQueueLock(() => mainQueue.length);
+}
+
+function withErrorQueueLock(task) {
+  const result = errorQueueLock.then(task);
+  errorQueueLock = result.catch(() => {});
+  return result;
+}
+
+function enqueueErrorQueue(file) {
+  return withErrorQueueLock(() => {
+    if (!errorQueue.includes(file)) errorQueue.push(file);
+  });
+}
+
+function removeErrorQueue(file) {
+  return withErrorQueueLock(() => {
+    const errorIndex = errorQueue.indexOf(file);
+    if (errorIndex !== -1) errorQueue.splice(errorIndex, 1);
+  });
+}
+
+function getDueErrorQueueItem(now) {
+  return withErrorQueueLock(() => ({
+    file: errorQueue.find((file) =>
+      file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now && file.attempts <= MAX_FILE_RETRIES),
+    length: errorQueue.length,
+  }));
+}
+
+function getErrorQueueLength() {
+  return withErrorQueueLock(() => errorQueue.length);
 }
 
 function log(message, logLevel) {
@@ -146,20 +200,22 @@ async function loadState() {
 
   log(`Формируем очередь загрузки...`, 'trace');
 
-  await withStateLock(() => {
+  await withStateLock(async () => {
     for (const [remotePath, file] of Object.entries(state.files)) {
       if (file.status === FILE_STATUS.DOWNLOADING) {
         file.status = FILE_STATUS.PENDING;
       }
       if (file.status === FILE_STATUS.PENDING) {
-        mainQueue.push(remotePath);
+        await enqueueMainQueue(remotePath);
       } else if (file.status === FILE_STATUS.ERROR) {
-        errorQueue.push(file);
+        await enqueueErrorQueue(file);
       }
     }
   });
 
-  log(`Состояние загружено. ${mainQueue.length} файлов в основной очереди и ${errorQueue.length} в очереди ошибок.`, 'info');
+  const mainQueueLength = await getMainQueueLength();
+  const errorQueueLength = await getErrorQueueLength();
+  log(`Состояние загружено. ${mainQueueLength} файлов в основной очереди и ${errorQueueLength} в очереди ошибок.`, 'info');
 }
 
 // Mutex for `state`: tasks run strictly one after another; a task must not call these helpers itself.
@@ -340,7 +396,7 @@ async function discoverRemoteFiles() {
           attempts: 0,
           nextRetryAt: null,
         };
-        mainQueue.push(remotePath);
+        await enqueueMainQueue(remotePath);
       } else if (previous.status === FILE_STATUS.COMPLETED) {
         return;
       } else if (metadataChanged(previous, remoteFile)) {
@@ -350,7 +406,7 @@ async function discoverRemoteFiles() {
           attempts: 0,
           nextRetryAt: null,
         });
-        mainQueue.push(remotePath);
+        await enqueueMainQueue(remotePath);
       } else if (Object.entries(remoteFile).some(([key, value]) => previous[key] !== value)) {
         Object.assign(previous, remoteFile);
       }
@@ -430,12 +486,8 @@ async function downloadFile(remotePath, timeout) {
       file.downloadedAt = new Date().toISOString();
       file.nextRetryAt = null;
 
-      // remove entry from errorQueue if it exists
-      const errorIndex = errorQueue.indexOf(file);
-      if (errorIndex !== -1) {
-        errorQueue.splice(errorIndex, 1);
-      }
     });
+    await removeErrorQueue(file);
     log(`Скачан: ${remotePath}`, 'trace');
   } catch (error) {
     const delay = await updateState(() => {
@@ -443,10 +495,24 @@ async function downloadFile(remotePath, timeout) {
       file.attempts = (file.attempts || 0) + 1;
       const retryAfter = retryDelay(file.attempts);
       file.nextRetryAt = Date.now() + retryAfter;
-
-      if (!errorQueue.includes(file)) errorQueue.push(file);
       return retryAfter;
     });
+    await enqueueErrorQueue(file);
+
+    //log(error.status, 'error');
+    //log(error.code, 'error');
+    if (!error.status || error.status !== 503) {
+      log(`Проверяю состояние клиента`, 'warn');
+      try
+      {
+        const _ = await client.getDirectoryContents(config.remotePath);
+        log(`Соединение присутствует.`, 'info');
+      } catch (err) {
+        log(`Пересоздаю клиента`, 'warn');
+        client = createNewClient();
+      }
+    }
+
     log(`Ошибка ${remotePath}: ${error.message}. Повтор через ${delay / 1000} сек.`, 'error');
   }
 }
@@ -474,10 +540,10 @@ function calculateDownloadTimeout(fileSizeInBytes) {
 
 async function mainWorker() {
   mainWorkerRunning = true;
-  while (!stopping && (mainQueue.length > 0 || discoveryRunning)) {
-    const remotePath = mainQueue.shift();
+  while (!stopping) {
+    const { remotePath, length } = await dequeueMainQueueItem();
     if (remotePath) {
-      log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Processing file: ${remotePath}. Main queue length: ${mainQueue.length}.`, 'info');
+      log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Processing file: ${remotePath}. Main queue length: ${length}.`, 'info');
 
       const file = state.files[remotePath];
       if (file?.status === FILE_STATUS.PENDING) {
@@ -487,18 +553,18 @@ async function mainWorker() {
       continue;
     }
 
+    if (!discoveryRunning) break;
     await sleep(250);
   }
   mainWorkerRunning = false;
-  log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueue.length}.`, 'info');
+  const errorQueueLength = await getErrorQueueLength();
+  log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueueLength}.`, 'info');
 }
 
 async function retryWorker() {
-  while (!stopping && (errorQueue.length > 0 || mainWorkerRunning || discoveryRunning)) {
+  while (!stopping) {
     const now = Date.now();
-
-    const dueRetry = errorQueue.find((file) =>
-      file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now && file.attempts <= MAX_FILE_RETRIES);
+    const { file: dueRetry, length } = await getDueErrorQueueItem(now);
 
     if (dueRetry) {
       log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Processing file: ${dueRetry.remotePath}. Error queue length: ${errorQueue.length}.`, 'info');
@@ -511,10 +577,13 @@ async function retryWorker() {
       continue;
     }
 
+    if (length === 0 && !mainWorkerRunning && !discoveryRunning) break;
+
     // wait for the queue
     await sleep(1000);
   }
-  log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueue.length}.`, 'info');
+  const errorQueueLength = await getErrorQueueLength();
+  log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueueLength}.`, 'info');
 }
 
 function escapeHtml(value) {
