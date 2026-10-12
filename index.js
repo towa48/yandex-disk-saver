@@ -294,10 +294,16 @@ async function listRemoteFiles(remotePath, onFile) {
     log(`children updated for ${folder.path}`, 'trace');
   });
 
+  // Write folders
+  await writeStateFile();
+
   log(`process files of ${folder.path}`, 'trace');
   for (const file of childrenFiles) {
     await onFile(file);
   }
+
+  // Write files
+  await writeStateFile();
 
   for (const child of folder.children) {
     log(`process next child for ${folder.path}: ${child}`, 'trace');
@@ -329,7 +335,6 @@ async function discoverRemoteFiles() {
       const { remotePath } = remoteFile;
       seen.add(remotePath);
       const previous = state.files[remotePath];
-      let changed = false;
 
       if (!previous) {
         state.files[remotePath] = {
@@ -339,7 +344,6 @@ async function discoverRemoteFiles() {
           nextRetryAt: null,
         };
         mainQueue.push(remotePath);
-        changed = true;
       } else if (previous.status === FILE_STATUS.COMPLETED) {
         return;
       } else if (metadataChanged(previous, remoteFile)) {
@@ -350,13 +354,9 @@ async function discoverRemoteFiles() {
           nextRetryAt: null,
         });
         mainQueue.push(remotePath);
-        changed = true;
       } else if (Object.entries(remoteFile).some(([key, value]) => previous[key] !== value)) {
         Object.assign(previous, remoteFile);
-        changed = true;
       }
-
-      if (changed) await writeStateFile();
     }));
 
     await withStateLock(async () => {
@@ -646,9 +646,9 @@ async function start() {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
+  const discovery = discoverRemoteFiles();
   const main = mainWorker(); 
   const retry = retryWorker();
-  const discovery = discoverRemoteFiles();
 
   runningTasks.push(
     main,
