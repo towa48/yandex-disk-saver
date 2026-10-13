@@ -19,6 +19,7 @@ const DIRECTORY_LIST_DELAY_MS = 1000;
 const DIRECTORY_REQUEST_TIMEOUT_MS = 10_000;
 const REPORT_INTERVAL_MS = 30_000;
 const MAX_FILE_RETRIES = 3;
+const FILE_DOWNLOAD_TIMEOUT_MS = 250;
 
 const YELLOW_COLOR = "\x1b[33m";
 const RESET_COLOR = "\x1b[0m";
@@ -563,12 +564,12 @@ function calculateDownloadTimeout(fileSizeInBytes) {
 
 function subscribeToMainQueue() {
   mainQueue.pipe(concatMap(async (remotePath) => {
+    if (stopping)
+      return;
+
     mainQueueLength -= 1;
     const length = mainQueueLength;
     log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Processing file: ${remotePath}. Main queue length: ${length}.`, 'info');
-
-    if (stopping)
-      return;
 
     let file = null
     await withStateLock(() => {
@@ -576,6 +577,8 @@ function subscribeToMainQueue() {
     });
 
     if (file?.status === FILE_STATUS.PENDING) {
+      await sleep(FILE_DOWNLOAD_TIMEOUT_MS);
+
       const timeout = calculateDownloadTimeout(file?.size);
       await downloadFile(remotePath, timeout);
     }
@@ -597,6 +600,8 @@ function subscribeToErrorQueue() {
   errorQueue.pipe(concatMap(async (file) => {
     if (stopping || file.status !== FILE_STATUS.ERROR || file.attempts >= MAX_FILE_RETRIES)
       return;
+
+    await sleep(FILE_DOWNLOAD_TIMEOUT_MS);
 
     const length = await getErrorQueueLength();
     log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Processing file: ${file.remotePath}. Error queue length: ${length}.`, 'info');
