@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { createClient } = require("webdav");
+const { Subject, concatMap, mergeMap } = require("rxjs");
 const { loadavg } = require("node:os");
 require("dotenv").config();
 
@@ -16,7 +17,6 @@ const FILE_STATUS = Object.freeze({
 
 const DIRECTORY_LIST_DELAY_MS = 1000;
 const REPORT_INTERVAL_MS = 30_000;
-const RETRY_DELAYS_MS = [10_000, 20_000, 30_000];
 const MAX_FILE_RETRIES = 3;
 
 const YELLOW_COLOR = "\x1b[33m";
@@ -84,12 +84,13 @@ function recreateWebDavClient() {
 const state = { version: 1, files: {}, folders: {} };
 let stopping = false;
 let stateLock = Promise.resolve();
-let mainWorkerRunning = false;
 let discoveryRunning = false;
-const mainQueue = [];
-let mainQueueLock = Promise.resolve();
-const errorQueue = [];
-let errorQueueLock = Promise.resolve();
+
+const mainQueue = new Subject();
+let mainQueueLength = 0;
+const errorQueue = new Subject();
+let errorQueueLength = 0;
+
 const waiters = new Set();
 
 function sleep(milliseconds) {
@@ -104,56 +105,22 @@ function sleep(milliseconds) {
   });
 }
 
-function withMainQueueLock(task) {
-  const result = mainQueueLock.then(task);
-  mainQueueLock = result.catch(() => {});
-  return result;
+function enqueueFileDownload(remotePath) {
+  mainQueueLength += 1;
+  mainQueue.next(remotePath);
 }
 
-function enqueueMainQueue(remotePath) {
-  return withMainQueueLock(() => mainQueue.push(remotePath));
+function getDownloadQueueLength() {
+  return mainQueueLength;
 }
 
-function dequeueMainQueueItem() {
-  return withMainQueueLock(() => ({
-    remotePath: mainQueue.shift(),
-    length: mainQueue.length,
-  }));
-}
-
-function getMainQueueLength() {
-  return withMainQueueLock(() => mainQueue.length);
-}
-
-function withErrorQueueLock(task) {
-  const result = errorQueueLock.then(task);
-  errorQueueLock = result.catch(() => {});
-  return result;
-}
-
-function enqueueErrorQueue(file) {
-  return withErrorQueueLock(() => {
-    if (!errorQueue.includes(file)) errorQueue.push(file);
-  });
-}
-
-function removeErrorQueue(file) {
-  return withErrorQueueLock(() => {
-    const errorIndex = errorQueue.indexOf(file);
-    if (errorIndex !== -1) errorQueue.splice(errorIndex, 1);
-  });
-}
-
-function getDueErrorQueueItem(now) {
-  return withErrorQueueLock(() => ({
-    file: errorQueue.find((file) =>
-      file.status === FILE_STATUS.ERROR && (file.nextRetryAt || 0) <= now && file.attempts <= MAX_FILE_RETRIES),
-    length: errorQueue.length,
-  }));
+function enqueueDownloadRetry(errorFile) {
+  errorQueueLength += 1;
+  errorQueue.next(errorFile);
 }
 
 function getErrorQueueLength() {
-  return withErrorQueueLock(() => errorQueue.length);
+  return errorQueueLength;
 }
 
 function log(message, logLevel) {
@@ -224,14 +191,14 @@ async function loadState() {
         file.status = FILE_STATUS.PENDING;
       }
       if (file.status === FILE_STATUS.PENDING) {
-        await enqueueMainQueue(remotePath);
+        await enqueueFileDownload(remotePath);
       } else if (file.status === FILE_STATUS.ERROR) {
-        await enqueueErrorQueue(file);
+        await enqueueDownloadRetry(file);
       }
     }
   });
 
-  const mainQueueLength = await getMainQueueLength();
+  const mainQueueLength = await getDownloadQueueLength();
   const errorQueueLength = await getErrorQueueLength();
   log(`Состояние загружено. ${mainQueueLength} файлов в основной очереди и ${errorQueueLength} в очереди ошибок.`, 'info');
 }
@@ -417,7 +384,7 @@ async function discoverRemoteFiles() {
           attempts: 0,
           nextRetryAt: null,
         };
-        await enqueueMainQueue(remotePath);
+        await enqueueFileDownload(remotePath);
       } else if (previous.status === FILE_STATUS.COMPLETED) {
         return;
       } else if (metadataChanged(previous, remoteFile)) {
@@ -427,7 +394,7 @@ async function discoverRemoteFiles() {
           attempts: 0,
           nextRetryAt: null,
         });
-        await enqueueMainQueue(remotePath);
+        await enqueueFileDownload(remotePath);
       } else if (Object.entries(remoteFile).some(([key, value]) => previous[key] !== value)) {
         Object.assign(previous, remoteFile);
       }
@@ -439,6 +406,7 @@ async function discoverRemoteFiles() {
     }
   } finally {
     discoveryRunning = false;
+    mainQueue.complete();
     log('=> Сканирование завершено.', 'info');
   }
 }
@@ -464,12 +432,12 @@ function localPathFor(remotePath) {
   return localPath;
 }
 
-function retryDelay(attempts) {
-  return RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)];
-}
-
 async function downloadFile(remotePath, timeout) {
-  const file = state.files[remotePath];
+  let file = null;
+  await withStateLock(() => {
+    file = state.files[remotePath];
+  });
+
   if (!file) return;
 
   const timeout2 = timeout || 60_000;
@@ -478,6 +446,7 @@ async function downloadFile(remotePath, timeout) {
   await updateState(() => {
     file.status = FILE_STATUS.DOWNLOADING;
   });
+
   try {
     const destination = localPathFor(remotePath);
     await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -507,19 +476,22 @@ async function downloadFile(remotePath, timeout) {
       file.status = FILE_STATUS.COMPLETED;
       file.downloadedAt = new Date().toISOString();
       file.nextRetryAt = null;
-
     });
-    await removeErrorQueue(file);
+
     log(`Скачан: ${remotePath}`, 'trace');
   } catch (error) {
-    const delay = await updateState(() => {
+    log(`Ошибка ${remotePath}: ${error.message}.`, 'error');
+
+    await updateState(() => {
       file.status = FILE_STATUS.ERROR;
       file.attempts = (file.attempts || 0) + 1;
-      const retryAfter = retryDelay(file.attempts);
-      file.nextRetryAt = Date.now() + retryAfter;
-      return retryAfter;
     });
-    await enqueueErrorQueue(file);
+
+    // append the file to the error queue if it hasn't reached the max retries yet
+    if (file.attempts < MAX_FILE_RETRIES)
+    {
+      enqueueDownloadRetry(file);
+    }
 
     //log(error.status, 'error');
     //log(error.code, 'error');
@@ -532,11 +504,15 @@ async function downloadFile(remotePath, timeout) {
         log(`Соединение присутствует.`, 'info');
       } catch (err) {
         log(`Пересоздаю клиента`, 'warn');
-        await recreateWebDavClient();
+        try
+        {
+          await recreateWebDavClient();
+        }
+        catch (err) {
+          log(`Ошибка при пересоздании клиента: ${err.message}`, 'error');
+        }
       }
     }
-
-    log(`Ошибка ${remotePath}: ${error.message}. Повтор через ${delay / 1000} сек.`, 'error');
   }
 }
 
@@ -561,52 +537,57 @@ function calculateDownloadTimeout(fileSizeInBytes) {
   return Math.round(timeoutMs);
 }
 
-async function mainWorker() {
-  mainWorkerRunning = true;
-  while (!stopping) {
-    const { remotePath, length } = await dequeueMainQueueItem();
-    if (remotePath) {
-      log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Processing file: ${remotePath}. Main queue length: ${length}.`, 'info');
+function subscribeToMainQueue() {
+  mainQueue.pipe(concatMap(async (remotePath) => {
+    mainQueueLength -= 1;
+    const length = mainQueueLength;
+    log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Processing file: ${remotePath}. Main queue length: ${length}.`, 'info');
 
-      const file = state.files[remotePath];
-      if (file?.status === FILE_STATUS.PENDING) {
-        const timeout = calculateDownloadTimeout(file?.size);
-        await downloadFile(remotePath, timeout);
-      }
-      continue;
+    if (stopping)
+      return;
+
+    let file = null
+    await withStateLock(() => {
+      file = state.files[remotePath];
+    });
+
+    if (file?.status === FILE_STATUS.PENDING) {
+      const timeout = calculateDownloadTimeout(file?.size);
+      await downloadFile(remotePath, timeout);
     }
-
-    if (!discoveryRunning) break;
-    await sleep(250);
-  }
-  mainWorkerRunning = false;
-  const errorQueueLength = await getErrorQueueLength();
-  log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueueLength}.`, 'info');
+  })).subscribe({
+    error: (error) => {
+      log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Worker encountered an error: ${error.message}`, 'error');
+    },
+    complete: async () => {
+      const errorQueueLength = await getErrorQueueLength();
+      log(`${ORANGE_COLOR}MAIN:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueueLength}.`, 'info');
+    
+      mainQueue.unsubscribe();
+      errorQueue.complete();
+    },
+  });
 }
 
-async function retryWorker() {
-  while (!stopping) {
-    const now = Date.now();
-    const { file: dueRetry, length } = await getDueErrorQueueItem(now);
+function subscribeToErrorQueue() {
+  errorQueue.pipe(concatMap(async (file) => {
+    if (stopping || file.status !== FILE_STATUS.ERROR || file.attempts >= MAX_FILE_RETRIES)
+      return;
 
-    if (dueRetry) {
-      log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Processing file: ${dueRetry.remotePath}. Error queue length: ${errorQueue.length}.`, 'info');
-      const file = dueRetry;
-      const timeout = calculateDownloadTimeout(file?.size);
-      await downloadFile(dueRetry.remotePath, timeout);
-
-      // wait to the next entity
-      await sleep(250);
-      continue;
-    }
-
-    if (length === 0 && !mainWorkerRunning && !discoveryRunning) break;
-
-    // wait for the queue
-    await sleep(1000);
-  }
-  const errorQueueLength = await getErrorQueueLength();
-  log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Worker stopped. Error queue length: ${errorQueueLength}.`, 'info');
+    const length = await getErrorQueueLength();
+    log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Processing file: ${file.remotePath}. Error queue length: ${length}.`, 'info');
+    
+    const timeout = calculateDownloadTimeout(file.size);
+    await downloadFile(file.remotePath, timeout);
+  })).subscribe({
+    error: (error) => {
+      log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Worker encountered an error: ${error.message}`, 'error');
+    },
+    complete: async () => {
+      const length = await getErrorQueueLength();
+      log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Worker stopped. Error queue length: ${length}.`, 'info');
+    },
+  });
 }
 
 function escapeHtml(value) {
@@ -707,10 +688,15 @@ async function runPeriodic(task, interval, label) {
 async function shutdown() {
   if (stopping) return;
   stopping = true;
+
   for (const wake of waiters) wake();
-  log("Остановка: сохраняю состояние...", 'info');
-  await persistState();
+  mainQueue.complete();
+  errorQueue.complete();
+  mainQueue.unsubscribe();
+  errorQueue.unsubscribe();
+
   await Promise.allSettled(runningTasks);
+  log("Остановка: сохраняю состояние...", 'info');
   await persistState();
   process.exitCode = 0;
 }
@@ -718,22 +704,23 @@ async function shutdown() {
 let runningTasks = [];
 
 async function start() {
-  await loadState();
   await fs.mkdir(config.destinationDir, { recursive: true });
+
+  subscribeToMainQueue();
+  subscribeToErrorQueue();
+
+  await loadState();
 
   const stop = async () => {
     await shutdown();
   };
+
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
   const discovery = discoverRemoteFiles();
-  const main = mainWorker(); 
-  const retry = retryWorker();
 
   runningTasks.push(
-    main,
-    retry,
     discovery,
     runPeriodic(writeReport, REPORT_INTERVAL_MS, "Ошибка создания отчёта"),
   );
@@ -741,7 +728,7 @@ async function start() {
   log(`Запущено. Сервер: ${config.url}; папка назначения: ${config.destinationDir}`, 'info');
 
   // wait for the main threads
-  await Promise.allSettled([ main, retry, discovery ]);
+  await Promise.allSettled([ discovery ]);
 
   if (stopping) return;
 }
