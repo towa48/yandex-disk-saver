@@ -1,9 +1,9 @@
 {
   "name": "yandex_disk_saver",
   "version": "1.0.0",
-  "private": true,
   "description": "Resumable WebDAV downloader with an HTML progress report",
   "main": "index.js",
+  "license":"MIT",
   "scripts": {
     "start": "node index.js",
     "test": "node --test"
