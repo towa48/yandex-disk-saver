@@ -132,3 +132,82 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+test("shutdown waits for an active download before saving state", async () => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "webdav-shutdown-"));
+  const contents = "done";
+  const etag = crypto.createHash("md5").update(contents).digest("hex");
+  let downloadStartedResolve;
+  let downloadResponse;
+  let child;
+  const downloadStarted = new Promise((resolve) => { downloadStartedResolve = resolve; });
+  const response = (href, properties) =>
+    `<d:response><d:href>${href}</d:href><d:propstat><d:prop>${properties}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`;
+  const server = http.createServer((request, responseStream) => {
+    if (request.method === "PROPFIND") {
+      responseStream.writeHead(207, { "Content-Type": "application/xml" });
+      responseStream.end(`<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">${response("/slow.txt", `<d:resourcetype/><d:getcontentlength>${contents.length}</d:getcontentlength><d:getetag>${etag}</d:getetag>`)}</d:multistatus>`);
+      return;
+    }
+
+    if (request.method === "GET" && request.url.endsWith("/slow.txt")) {
+      downloadResponse = responseStream;
+      responseStream.writeHead(200, { "Content-Length": String(contents.length) });
+      downloadStartedResolve();
+      return;
+    }
+
+    responseStream.writeHead(405).end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    child = spawn(process.execPath, [path.resolve(__dirname, "..", "index.js")], {
+      cwd: path.resolve(__dirname, ".."),
+      env: {
+        ...process.env,
+        WEBDAV_PROTOCOL: "http",
+        WEBDAV_HOST: "127.0.0.1",
+        WEBDAV_PORT: String(server.address().port),
+        WEBDAV_REMOTE_PATH: "/",
+        DESTINATION_DIR: path.join(temporaryDirectory, "downloads"),
+        STATE_FILE: path.join(temporaryDirectory, "state.json"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+
+    await Promise.race([
+      downloadStarted,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`Загрузка не началась: ${output}`)), 5_000)),
+    ]);
+
+    const childExit = new Promise((resolve) => child.once("exit", resolve));
+    child.kill("SIGINT");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(child.exitCode, null, "процесс должен ждать завершения активной загрузки");
+
+    downloadResponse.end(contents);
+    await Promise.race([
+      childExit,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Ожидание загрузки при остановке превысило 5 секунд")), 5_000)),
+    ]);
+
+    const saved = JSON.parse(await fs.readFile(path.join(temporaryDirectory, "state.json"), "utf8"));
+    assert.equal(saved.files["/slow.txt"].status, "completed");
+  } finally {
+    if (downloadResponse && !downloadResponse.writableEnded) downloadResponse.end(contents);
+    if (child && child.exitCode === null) {
+      child.kill("SIGKILL");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
+    const serverClosed = new Promise((resolve) => server.close(resolve));
+    server.closeAllConnections?.();
+    await serverClosed;
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});

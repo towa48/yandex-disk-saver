@@ -92,6 +92,14 @@ const errorQueue = new Subject();
 let errorQueueLength = 0;
 
 const waiters = new Set();
+const downloadWaiters = new Set();
+let activeDownloads = 0;
+
+function waitForActiveDownloads() {
+  if (activeDownloads === 0)
+    return Promise.resolve();
+  return new Promise((resolve) => downloadWaiters.add(resolve));
+}
 
 function sleep(milliseconds) {
   return new Promise((resolve) => {
@@ -433,6 +441,22 @@ function localPathFor(remotePath) {
 }
 
 async function downloadFile(remotePath, timeout) {
+  if (stopping)
+    return;
+
+  activeDownloads += 1;
+  try {
+    await performDownload(remotePath, timeout);
+  } finally {
+    activeDownloads -= 1;
+    if (activeDownloads === 0) {
+      for (const resolve of downloadWaiters) resolve();
+      downloadWaiters.clear();
+    }
+  }
+}
+
+async function performDownload(remotePath, timeout) {
   let file = null;
   await withStateLock(() => {
     file = state.files[remotePath];
@@ -576,7 +600,7 @@ function subscribeToErrorQueue() {
 
     const length = await getErrorQueueLength();
     log(`${ORANGE_COLOR}RETRY:${RESET_COLOR} Processing file: ${file.remotePath}. Error queue length: ${length}.`, 'info');
-    
+
     const timeout = calculateDownloadTimeout(file.size);
     await downloadFile(file.remotePath, timeout);
   })).subscribe({
@@ -692,9 +716,8 @@ async function shutdown() {
   for (const wake of waiters) wake();
   mainQueue.complete();
   errorQueue.complete();
-  mainQueue.unsubscribe();
-  errorQueue.unsubscribe();
 
+  await waitForActiveDownloads();
   await Promise.allSettled(runningTasks);
   log("Остановка: сохраняю состояние...", 'info');
   await persistState();
