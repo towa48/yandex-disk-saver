@@ -16,6 +16,7 @@ const FILE_STATUS = Object.freeze({
 });
 
 const DIRECTORY_LIST_DELAY_MS = 1000;
+const DIRECTORY_REQUEST_TIMEOUT_MS = 10_000;
 const REPORT_INTERVAL_MS = 30_000;
 const MAX_FILE_RETRIES = 3;
 
@@ -79,6 +80,65 @@ function recreateWebDavClient() {
     client = createWebDavClient();
     return client;
   });
+}
+
+async function getDirectoryContentsWithTimeout(remotePath) {
+  const webDavClient = await getWebDavClient();
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DIRECTORY_REQUEST_TIMEOUT_MS);
+  try {
+    return await webDavClient.getDirectoryContents(remotePath, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkAndRecreateWebDavClient() {
+  try {
+    log(`Проверяю состояние клиента`, 'warn');
+    await getDirectoryContentsWithTimeout(config.remotePath);
+    log(`Клиент в рабочем состоянии`, 'warn');
+  } catch (error) {
+    log(`ERROR: ${error.message}`, 'error');
+    log(`Ошибка при проверке клиента, пересоздаю.`, 'warn');
+    await recreateWebDavClient();
+  }
+}
+
+async function getFileContents(path, timeout) {
+  const webDavClient = await getWebDavClient();
+  try {
+    const result = await webDavClient.getFileContents(path, { format: "binary", timeout });
+    return result;
+  } catch (error) {
+    if (error.status && error.status === 503) {
+      // for the 503 set ERROR status for the file
+      throw error;
+    }
+
+    // trying to recreate the WebDav client if the error is not a 503
+    await checkAndRecreateWebDavClient();
+    const newClient = await getWebDavClient();
+    return await newClient.getFileContents(path, { format: "binary", timeout });
+  }
+}
+
+async function getDirectoryContents(path, retry = 0) {
+  try {
+    const result = await getDirectoryContentsWithTimeout(path);
+    return result;
+  } catch (error) {
+    if (isRateLimitError(error) && retry < 3) {
+      await sleep(DIRECTORY_LIST_DELAY_MS);
+      return await getDirectoryContents(path, retry + 1);
+    }
+
+    log(`Ошибка запроса каталога ${path}: ${error.message}. Проверяю подключение к этому же каталогу.`, 'error');
+
+    await checkAndRecreateWebDavClient();
+    return await getDirectoryContentsWithTimeout(path);
+  }
 }
 
 const state = { version: 1, files: {}, folders: {} };
@@ -253,44 +313,6 @@ function getEntryPath(entry) {
   return path.posix.join(config.remotePath, entry.basename);
 }
 
-async function getDirectoryContentsWithRecovery(directory) {
-  try {
-    const webDavClient = await getWebDavClient();
-    return await webDavClient.getDirectoryContents(directory);
-  } catch (requestError) {
-    if (isRateLimitError(requestError)) {
-        await sleep(DIRECTORY_LIST_DELAY_MS);
-        return await getDirectoryContentsWithRecovery(directory);
-    }
-
-    log(`Ошибка запроса каталога ${directory}: ${requestError.message}. Проверяю подключение к этому же каталогу.`, 'error');
-    try {
-      const webDavClient = await getWebDavClient();
-      const entries = await webDavClient.getDirectoryContents(directory);
-      log(`Подключение WebDAV доступно; продолжаю с каталога ${directory}.`, 'info');
-      return entries;
-    } catch (checkError) {
-      if (isRateLimitError(checkError)) {
-        await sleep(DIRECTORY_LIST_DELAY_MS);
-        return await getDirectoryContentsWithRecovery(directory);
-      }
-
-      log(`Каталог ${directory} недоступен: ${checkError.message}. Пересоздаю клиент.`, 'error');
-      await recreateWebDavClient();
-
-      try {
-        const webDavClient = await getWebDavClient();
-        const entries = await webDavClient.getDirectoryContents(directory);
-        log(`Подключение восстановлено; продолжаю с каталога ${directory}.`, 'info');
-        return entries;
-      } catch (reconnectError) {
-        await sleep(DIRECTORY_LIST_DELAY_MS);
-        return await getDirectoryContentsWithRecovery(directory);
-      }
-    }
-  }
-}
-
 async function listRemoteFiles(remotePath, onFile) {
   const folder = state.folders[remotePath] || {
     path: remotePath,
@@ -311,7 +333,7 @@ async function listRemoteFiles(remotePath, onFile) {
 
   const entries = folder.status == FILE_STATUS.DOWNLOADING
     ? folder.children.map(path => ({ type: "directory", filename: path })) // only folders
-    : await getDirectoryContentsWithRecovery(folder.path);
+    : await getDirectoryContents(folder.path);
 
   await withStateLock(() => {
     folder.status = FILE_STATUS.DOWNLOADING;
@@ -474,8 +496,7 @@ async function performDownload(remotePath, timeout) {
   try {
     const destination = localPathFor(remotePath);
     await fs.mkdir(path.dirname(destination), { recursive: true });
-    const webDavClient = await getWebDavClient();
-    const contents = await webDavClient.getFileContents(remotePath, { format: "binary", timeout: timeout2 });
+    const contents = await getFileContents(remotePath, timeout2);
     const buffer = Buffer.from(contents);
     const temporaryPath = `${destination}.part`;
     await fs.writeFile(temporaryPath, buffer);
@@ -515,27 +536,6 @@ async function performDownload(remotePath, timeout) {
     if (file.attempts < MAX_FILE_RETRIES)
     {
       enqueueDownloadRetry(file);
-    }
-
-    //log(error.status, 'error');
-    //log(error.code, 'error');
-    if (!error.status || error.status !== 503) {
-      log(`Проверяю состояние клиента`, 'warn');
-      try
-      {
-        const webDavClient = await getWebDavClient();
-        const _ = await webDavClient.getDirectoryContents(config.remotePath);
-        log(`Соединение присутствует.`, 'info');
-      } catch (err) {
-        log(`Пересоздаю клиента`, 'warn');
-        try
-        {
-          await recreateWebDavClient();
-        }
-        catch (err) {
-          log(`Ошибка при пересоздании клиента: ${err.message}`, 'error');
-        }
-      }
     }
   }
 }
