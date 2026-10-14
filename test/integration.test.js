@@ -9,6 +9,30 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
 
+async function waitWithTimeout(promise, timeoutMs, message) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function forceStopChild(child) {
+  if (!child || child.exitCode !== null) return;
+
+  const childExit = new Promise((resolve) => child.once("exit", resolve));
+  child.kill("SIGKILL");
+  try {
+    await waitWithTimeout(childExit, 2_000, "Дочерний процесс не завершился после SIGKILL");
+  } catch {}
+}
+
 test("downloads files, retries server errors, saves state, and stops promptly", async (t) => {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "webdav-downloader-"));
   const failedRequests = [];
@@ -90,29 +114,23 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
     child.stderr.on("data", (chunk) => { output += chunk; });
 
     const deadline = Date.now() + 18_000;
-    while (Date.now() < deadline && (failedRequests.length < 2 || corruptFileRequests < 2)) {
+    while (Date.now() < deadline && (failedRequests.length < 4 || corruptFileRequests < 2)) {
       if (child.exitCode !== null) throw new Error(`Приложение завершилось раньше времени: ${output}`);
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
-    assert.ok(failedRequests.length >= 2, `Повторная попытка не выполнена: ${output}`);
+    assert.ok(failedRequests.length >= 4, `Повторная попытка не выполнена: ${output}`);
     assert.ok(corruptFileRequests >= 2, `Повторная загрузка после ошибки MD5 не выполнена: ${output}`);
     assert.ok(downloadUserAgents.length > 0);
     assert.ok(downloadUserAgents.every((userAgent) => userAgent === "Yandex.Disk/3.2.51 (Windows; 10.0)"));
+    assert.ok(failedRequests[2] - failedRequests[1] >= 200, "Повтор из очереди должен учитывать задержку перед загрузкой");
     assert.equal(await fs.readFile(path.join(temporaryDirectory, "downloads", "folder", "ok.txt"), "utf8"), "ok");
     assert.equal(await fs.readFile(path.join(temporaryDirectory, "downloads", "folder", "corrupt.txt"), "utf8"), "good");
 
     const startedAt = Date.now();
     const childExit = new Promise((resolve) => child.once("exit", resolve));
     child.kill("SIGINT");
-    let shutdownTimer;
-    await Promise.race([
-      childExit,
-      new Promise((_, reject) => {
-        shutdownTimer = setTimeout(() => reject(new Error("Остановка приложения заняла больше 4 секунд")), 4_000);
-      }),
-    ]);
-    clearTimeout(shutdownTimer);
+    await waitWithTimeout(childExit, 4_000, "Остановка приложения заняла больше 4 секунд");
     assert.ok(Date.now() - startedAt < 4_000);
 
     const saved = JSON.parse(await fs.readFile(path.join(temporaryDirectory, "state.json"), "utf8"));
@@ -127,10 +145,7 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
     assert.match(report, /Папка \(до 2 уровней\)/);
     assert.match(report, /Общий размер/);
   } finally {
-    if (child && child.exitCode === null) {
-      child.kill("SIGKILL");
-      await new Promise((resolve) => child.once("exit", resolve));
-    }
+    await forceStopChild(child);
     const serverClosed = new Promise((resolve) => server.close(resolve));
     server.closeAllConnections?.();
     await serverClosed;
@@ -206,10 +221,7 @@ test("shutdown waits for an active download before saving state", async () => {
     assert.equal(saved.files["/slow.txt"].status, "completed");
   } finally {
     if (downloadResponse && !downloadResponse.writableEnded) downloadResponse.end(contents);
-    if (child && child.exitCode === null) {
-      child.kill("SIGKILL");
-      await new Promise((resolve) => child.once("exit", resolve));
-    }
+    await forceStopChild(child);
     const serverClosed = new Promise((resolve) => server.close(resolve));
     server.closeAllConnections?.();
     await serverClosed;
