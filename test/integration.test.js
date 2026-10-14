@@ -12,6 +12,7 @@ const { test } = require("node:test");
 test("downloads files, retries server errors, saves state, and stops promptly", async (t) => {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "webdav-downloader-"));
   const failedRequests = [];
+  const downloadUserAgents = [];
   let corruptFileRequests = 0;
   let child;
   const md5 = (contents) => crypto.createHash("md5").update(contents).digest("hex");
@@ -40,6 +41,7 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
     }
 
     if (request.method === "GET" && request.url.endsWith("/corrupt.txt")) {
+      downloadUserAgents.push(request.headers["user-agent"]);
       corruptFileRequests += 1;
       const contents = corruptFileRequests === 1 ? "bad!" : "good";
       responseStream.writeHead(200, { "Content-Length": String(Buffer.byteLength(contents)) });
@@ -48,6 +50,7 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
     }
 
     if (request.method === "GET" && request.url.endsWith("/fail.txt")) {
+      downloadUserAgents.push(request.headers["user-agent"]);
       failedRequests.push(Date.now());
       responseStream.writeHead(500);
       responseStream.end("intentional failure");
@@ -55,6 +58,7 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
     }
 
     if (request.method === "GET") {
+      downloadUserAgents.push(request.headers["user-agent"]);
       responseStream.writeHead(200, { "Content-Length": "2" });
       responseStream.end("ok");
       return;
@@ -93,6 +97,8 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
 
     assert.ok(failedRequests.length >= 2, `Повторная попытка не выполнена: ${output}`);
     assert.ok(corruptFileRequests >= 2, `Повторная загрузка после ошибки MD5 не выполнена: ${output}`);
+    assert.ok(downloadUserAgents.length > 0);
+    assert.ok(downloadUserAgents.every((userAgent) => userAgent === "Yandex.Disk/3.2.51 (Windows; 10.0)"));
     assert.ok(failedRequests[1] - failedRequests[0] >= 9_500, "Повтор должен начаться примерно через 10 секунд");
     assert.equal(await fs.readFile(path.join(temporaryDirectory, "downloads", "folder", "ok.txt"), "utf8"), "ok");
     assert.equal(await fs.readFile(path.join(temporaryDirectory, "downloads", "folder", "corrupt.txt"), "utf8"), "good");

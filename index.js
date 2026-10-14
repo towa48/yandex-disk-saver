@@ -20,6 +20,9 @@ const DIRECTORY_REQUEST_TIMEOUT_MS = 10_000;
 const REPORT_INTERVAL_MS = 30_000;
 const MAX_FILE_RETRIES = 3;
 const FILE_DOWNLOAD_TIMEOUT_MS = 250;
+const FILE_DOWNLOAD_HEADERS = Object.freeze({
+  "User-Agent": "Yandex.Disk/3.2.51 (Windows; 10.0)",
+});
 
 const YELLOW_COLOR = "\x1b[33m";
 const RESET_COLOR = "\x1b[0m";
@@ -60,6 +63,7 @@ function createWebDavClient() {
   return createClient(config.url, {
     username: config.username,
     password: config.password,
+    headers: FILE_DOWNLOAD_HEADERS
   });
 }
 
@@ -110,7 +114,10 @@ async function checkAndRecreateWebDavClient() {
 async function getFileContents(path, timeout) {
   const webDavClient = await getWebDavClient();
   try {
-    const result = await webDavClient.getFileContents(path, { format: "binary", timeout });
+    const result = await webDavClient.getFileContents(path, {
+      format: "binary",
+      timeout,
+    });
     return result;
   } catch (error) {
     if (error.status && error.status === 503) {
@@ -121,7 +128,10 @@ async function getFileContents(path, timeout) {
     // trying to recreate the WebDav client if the error is not a 503
     await checkAndRecreateWebDavClient();
     const newClient = await getWebDavClient();
-    return await newClient.getFileContents(path, { format: "binary", timeout });
+    return await newClient.getFileContents(path, {
+      format: "binary",
+      timeout,
+    });
   }
 }
 
