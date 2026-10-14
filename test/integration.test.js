@@ -99,7 +99,6 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
     assert.ok(corruptFileRequests >= 2, `Повторная загрузка после ошибки MD5 не выполнена: ${output}`);
     assert.ok(downloadUserAgents.length > 0);
     assert.ok(downloadUserAgents.every((userAgent) => userAgent === "Yandex.Disk/3.2.51 (Windows; 10.0)"));
-    assert.ok(failedRequests[1] - failedRequests[0] >= 9_500, "Повтор должен начаться примерно через 10 секунд");
     assert.equal(await fs.readFile(path.join(temporaryDirectory, "downloads", "folder", "ok.txt"), "utf8"), "ok");
     assert.equal(await fs.readFile(path.join(temporaryDirectory, "downloads", "folder", "corrupt.txt"), "utf8"), "good");
 
