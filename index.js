@@ -755,6 +755,13 @@ async function start() {
 
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  if (process.send) {
+    process.once("message", async (message) => {
+      if (message !== "shutdown") return;
+      await stop();
+      process.disconnect();
+    });
+  }
 
   const discovery = discoverRemoteFiles();
 

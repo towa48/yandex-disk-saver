@@ -106,7 +106,7 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
         DESTINATION_DIR: path.join(temporaryDirectory, "downloads"),
         STATE_FILE: path.join(temporaryDirectory, "state.json"),
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
 
     let output = "";
@@ -129,7 +129,7 @@ test("downloads files, retries server errors, saves state, and stops promptly", 
 
     const startedAt = Date.now();
     const childExit = new Promise((resolve) => child.once("exit", resolve));
-    child.kill("SIGINT");
+    child.send("shutdown");
     await waitWithTimeout(childExit, 4_000, "Остановка приложения заняла больше 4 секунд");
     assert.ok(Date.now() - startedAt < 4_000);
 
@@ -194,7 +194,7 @@ test("shutdown waits for an active download before saving state", async () => {
         DESTINATION_DIR: path.join(temporaryDirectory, "downloads"),
         STATE_FILE: path.join(temporaryDirectory, "state.json"),
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
 
     let output = "";
@@ -207,7 +207,7 @@ test("shutdown waits for an active download before saving state", async () => {
     ]);
 
     const childExit = new Promise((resolve) => child.once("exit", resolve));
-    child.kill("SIGINT");
+    child.send("shutdown");
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(child.exitCode, null, "процесс должен ждать завершения активной загрузки");
 
