@@ -35,6 +35,8 @@ type Config struct {
 	RemotePath     string
 	DestinationDir string
 	StatePath      string
+	MaxCPUs        int
+	MemoryLimitMB  int
 }
 
 // LoadDotEnv does not override variables that are already set.
@@ -76,6 +78,14 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+func envInt(key string, fallback int) (int, error) {
+	value, err := strconv.Atoi(envOr(key, strconv.Itoa(fallback)))
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("%s должен быть целым числом не меньше 0", key)
+	}
+	return value, nil
+}
+
 func ReadConfig() (Config, error) {
 	protocol := strings.TrimSuffix(envOr("WEBDAV_PROTOCOL", "http"), ":")
 	host := envOr("WEBDAV_HOST", "localhost")
@@ -108,6 +118,15 @@ func ReadConfig() (Config, error) {
 		return Config{}, err
 	}
 
+	maxCPUs, err := envInt("MAX_CPUS", 2)
+	if err != nil {
+		return Config{}, err
+	}
+	memoryLimitMB, err := envInt("MEMORY_LIMIT_MB", 256)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		URL:            fmt.Sprintf("%s://%s:%d", protocol, host, port),
 		Username:       envOr("WEBDAV_USERNAME", "user"),
@@ -115,5 +134,7 @@ func ReadConfig() (Config, error) {
 		RemotePath:     remotePath,
 		DestinationDir: destinationDir,
 		StatePath:      statePath,
+		MaxCPUs:        maxCPUs,
+		MemoryLimitMB:  memoryLimitMB,
 	}, nil
 }

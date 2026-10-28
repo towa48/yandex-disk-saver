@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,16 +46,30 @@ func (a *App) localPathFor(remotePath string) (string, error) {
 	return localPath, nil
 }
 
-func (a *App) getFileContents(remotePath string, timeout time.Duration) ([]byte, error) {
-	data, err := a.client.GetFile(remotePath, timeout)
+// fetchToFile streams the file to temporaryPath and returns its MD5.
+func (a *App) fetchToFile(remotePath, temporaryPath string, timeout time.Duration) (string, error) {
+	attempt := func() (string, error) {
+		file, err := os.Create(temporaryPath)
+		if err != nil {
+			return "", err
+		}
+		hash := md5.New()
+		err = a.client.GetFile(remotePath, timeout, io.MultiWriter(file, hash))
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+		return hex.EncodeToString(hash.Sum(nil)), err
+	}
+
+	sum, err := attempt()
 	if err == nil || httpStatus(err) == http.StatusServiceUnavailable {
 		// for the 503 set ERROR status for the file
-		return data, err
+		return sum, err
 	}
 
 	// trying to recreate the client if the error is not a 503
 	a.client.CheckAndRecreate()
-	return a.client.GetFile(remotePath, timeout)
+	return attempt()
 }
 
 func (a *App) fetchToDisk(remotePath, etag string, timeout time.Duration) error {
@@ -66,20 +81,15 @@ func (a *App) fetchToDisk(remotePath, etag string, timeout time.Duration) error 
 		return err
 	}
 
-	contents, err := a.getFileContents(remotePath, timeout)
-	if err != nil {
-		return err
-	}
-
 	temporaryPath := destination + ".part"
-	if err := os.WriteFile(temporaryPath, contents, 0o644); err != nil {
+	actual, err := a.fetchToFile(remotePath, temporaryPath, timeout)
+	if err != nil {
+		os.Remove(temporaryPath)
 		return err
 	}
 
 	if etag != "" {
 		expected := strings.ToLower(strings.Trim(strings.TrimPrefix(strings.TrimPrefix(etag, "W/"), "w/"), `"`))
-		sum := md5.Sum(contents)
-		actual := hex.EncodeToString(sum[:])
 
 		if actual != expected {
 			os.Remove(temporaryPath)

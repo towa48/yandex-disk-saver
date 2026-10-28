@@ -104,26 +104,27 @@ func (c *WebDAVClient) ListDirectory(remotePath string, timeout time.Duration) (
 	return parseMultistatus(resp.Body, remotePath)
 }
 
-func (c *WebDAVClient) GetFile(remotePath string, timeout time.Duration) ([]byte, error) {
+func (c *WebDAVClient) GetFile(remotePath string, timeout time.Duration, dst io.Writer) error {
 	// Deliberately detached from the app context: shutdown waits for active downloads.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	req, err := c.newRequest(ctx, http.MethodGet, remotePath)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return nil, &HTTPError{Status: resp.StatusCode, Method: http.MethodGet, Path: remotePath}
+		return &HTTPError{Status: resp.StatusCode, Method: http.MethodGet, Path: remotePath}
 	}
-	return io.ReadAll(resp.Body)
+	_, err = io.Copy(dst, resp.Body)
+	return err
 }
 
 // CheckAndRecreate probes the server and replaces the HTTP client if the probe fails.
