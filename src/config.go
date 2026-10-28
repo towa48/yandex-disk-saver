@@ -15,7 +15,6 @@ const (
 	directoryListDelay      = time.Second
 	directoryRequestTimeout = 10 * time.Second
 	reportInterval          = 30 * time.Second
-	maxFileRetries          = 3
 	fileDownloadDelay       = 250 * time.Millisecond
 	defaultDownloadTimeout  = 60 * time.Second
 	userAgent               = "Yandex.Disk/3.2.51 (Windows; 10.0)"
@@ -37,6 +36,7 @@ type Config struct {
 	StatePath      string
 	MaxCPUs        int
 	MemoryLimitMB  int
+	MaxFileRetries int
 }
 
 // LoadDotEnv does not override variables that are already set.
@@ -126,6 +126,10 @@ func ReadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxFileRetries, err := envInt("MAX_FILE_RETRIES", 3)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		URL:            fmt.Sprintf("%s://%s:%d", protocol, host, port),
@@ -136,5 +140,6 @@ func ReadConfig() (Config, error) {
 		StatePath:      statePath,
 		MaxCPUs:        maxCPUs,
 		MemoryLimitMB:  memoryLimitMB,
+		MaxFileRetries: maxFileRetries,
 	}, nil
 }

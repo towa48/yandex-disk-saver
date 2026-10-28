@@ -104,7 +104,7 @@ func (a *App) runErrorQueue() {
 				status, attempts, size = file.Status, file.Attempts, file.Size
 			}
 		})
-		if a.ctx.Err() != nil || status != statusError || attempts >= maxFileRetries {
+		if a.ctx.Err() != nil || status != statusError || attempts >= a.cfg.MaxFileRetries {
 			continue
 		}
 

@@ -65,6 +65,7 @@ func testConfig(serverURL, dir string) Config {
 		RemotePath:     "/",
 		DestinationDir: filepath.Join(dir, "downloads"),
 		StatePath:      filepath.Join(dir, "state.json"),
+		MaxFileRetries: 3,
 	}
 }
 

@@ -141,7 +141,7 @@ func (a *App) downloadFile(remotePath string, timeout time.Duration) {
 		})
 
 		// append the file to the error queue if it hasn't reached the max retries yet
-		if attempts < maxFileRetries {
+		if attempts < a.cfg.MaxFileRetries {
 			a.errorQueue.Push(remotePath)
 		}
 		return
