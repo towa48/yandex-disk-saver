@@ -1,6 +1,14 @@
-node_modules/
+# Environment variables
 .env
+
+# Downloads directory
 downloads/
+
+# State
 state.json
 state.json.tmp
 *.zip
+
+# GO Executables
+yandex_disk_saver.exe
+yandex_disk_saver
