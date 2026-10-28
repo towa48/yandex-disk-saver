@@ -64,6 +64,9 @@ func loadDotEnv(path string) {
 			os.Setenv(key, value)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		logMessage(fmt.Sprintf("Не удалось прочитать %s: %v", path, err), "error")
+	}
 }
 
 func envOr(key, fallback string) string {
