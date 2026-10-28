@@ -180,7 +180,6 @@ func (a *App) registerRemoteFile(remote RemoteFile) {
 			previous.Size, previous.ETag, previous.LastMod = remote.Size, remote.ETag, remote.LastMod
 			previous.Status = statusPending
 			previous.Attempts = 0
-			previous.NextRetryAt = nil
 			a.mainQueue.Push(remote.RemotePath)
 		case !sameSize(previous.Size, remote.Size) || previous.ETag != remote.ETag || previous.LastMod != remote.LastMod:
 			previous.Size, previous.ETag, previous.LastMod = remote.Size, remote.ETag, remote.LastMod

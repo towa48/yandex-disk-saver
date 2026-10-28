@@ -141,7 +141,6 @@ func (a *App) downloadFile(remotePath string, timeout time.Duration) {
 		file := s.Files[remotePath]
 		file.Status = statusCompleted
 		file.DownloadedAt = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-		file.NextRetryAt = nil
 	})
 	logMessage(fmt.Sprintf("Скачан: %s", remotePath), "trace")
 }

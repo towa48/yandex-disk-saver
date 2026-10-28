@@ -18,7 +18,6 @@ type File struct {
 	LastMod           string `json:"lastmod"`
 	Status            string `json:"status"`
 	Attempts          int    `json:"attempts"`
-	NextRetryAt       *int64 `json:"nextRetryAt"`
 	DownloadedAt      string `json:"downloadedAt,omitempty"`
 	IntegrityFailures int    `json:"integrityFailures,omitempty"`
 }
