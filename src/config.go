@@ -1,4 +1,4 @@
-package main
+package src
 
 import (
 	"bufio"
@@ -37,8 +37,8 @@ type Config struct {
 	StatePath      string
 }
 
-// loadDotEnv does not override variables that are already set.
-func loadDotEnv(path string) {
+// LoadDotEnv does not override variables that are already set.
+func LoadDotEnv(path string) {
 	file, err := os.Open(path)
 	if err != nil {
 		return
@@ -76,7 +76,7 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func readConfig() (Config, error) {
+func ReadConfig() (Config, error) {
 	protocol := strings.TrimSuffix(envOr("WEBDAV_PROTOCOL", "http"), ":")
 	host := envOr("WEBDAV_HOST", "localhost")
 	port, err := strconv.Atoi(envOr("WEBDAV_PORT", "80"))

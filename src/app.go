@@ -1,4 +1,4 @@
-package main
+package src
 
 import (
 	"context"
@@ -128,8 +128,8 @@ func (a *App) runPeriodic(task func() error, interval time.Duration, label strin
 	}
 }
 
-// run works until ctx is cancelled, then waits for active downloads and saves the state.
-func run(ctx context.Context, cfg Config) error {
+// Run works until ctx is cancelled, then waits for active downloads and saves the state.
+func Run(ctx context.Context, cfg Config) error {
 	if err := os.MkdirAll(cfg.DestinationDir, 0o755); err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-package main
+package src
 
 import (
 	"context"
@@ -73,7 +73,7 @@ func startApp(cfg Config) (cancel context.CancelFunc, done chan struct{}) {
 	done = make(chan struct{})
 	go func() {
 		defer close(done)
-		run(ctx, cfg)
+		Run(ctx, cfg)
 	}()
 	return cancel, done
 }

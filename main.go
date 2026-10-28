@@ -6,12 +6,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"yandex_disk_saver/src"
 )
 
 func main() {
-	loadDotEnv(".env")
+	src.LoadDotEnv(".env")
 
-	cfg, err := readConfig()
+	cfg, err := src.ReadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Не удалось запустить приложение: %v\n", err)
 		os.Exit(1)
@@ -20,7 +21,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, cfg); err != nil {
+	if err := src.Run(ctx, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Не удалось запустить приложение: %v\n", err)
 		os.Exit(1)
 	}
