@@ -84,8 +84,8 @@ func (a *App) runMainQueue() {
 		}
 	}
 
-	logMessage(fmt.Sprintf("%sMAIN:%s Worker stopped. Error queue length: %d.",
-		colorOrange, colorReset, a.errorQueue.Len()), "info")
+	logMessage(fmt.Sprintf("%sMAIN:%s Worker stopped. Main queue length: %d.",
+		colorOrange, colorReset, a.mainQueue.Len()), "info")
 	a.errorQueue.Close()
 }
 
