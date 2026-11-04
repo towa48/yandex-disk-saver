@@ -1,10 +1,13 @@
-FROM golang:1.22-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /src
 COPY go.mod ./
 COPY main.go ./
 COPY src ./src
-RUN CGO_ENABLED=0 go build -o /out/yandex_disk_saver .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/yandex_disk_saver .
 
 FROM alpine:3.22
 
