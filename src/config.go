@@ -17,7 +17,7 @@ const (
 	reportInterval          = 30 * time.Second
 	fileDownloadDelay       = 250 * time.Millisecond
 	defaultDownloadTimeout  = 60 * time.Second
-	userAgent               = "Yandex.Disk/3.2.51 (Windows; 10.0)"
+	defaultUserAgent        = "WebDAVSyncTool/1.0"
 )
 
 const (
@@ -30,6 +30,7 @@ type Config struct {
 	URL            string
 	Username       string
 	Password       string
+	UserAgent      string
 	RemotePath     string
 	DestinationDir string
 	MaxCPUs        int
@@ -151,6 +152,7 @@ func ReadConfig() (Config, error) {
 		URL:                fmt.Sprintf("%s://%s:%d", protocol, host, port),
 		Username:           envOr("WEBDAV_USERNAME", "user"),
 		Password:           envOr("WEBDAV_PASSWORD", "password"),
+		UserAgent:          envOr("WEBDAV_USER_AGENT", defaultUserAgent),
 		RemotePath:         remotePath,
 		DestinationDir:     destinationDir,
 		MaxCPUs:            maxCPUs,

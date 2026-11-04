@@ -1,3 +1,3 @@
-module yandex_disk_saver
+module webdav_sync_tool
 
 go 1.22

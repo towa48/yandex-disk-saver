@@ -15,7 +15,7 @@ endif
 
 build:
 	@echo "Building the project..."
-	go build -o bin/yandex_disk_saver
+	go build -o bin/webdav_sync_tool
 	@echo "✓ Build complete."
 
 run:

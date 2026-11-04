@@ -10,8 +10,8 @@ state.json.tmp
 *.zip
 
 # GO Executables
-yandex_disk_saver.exe
-yandex_disk_saver
+webdav_sync_tool.exe
+webdav_sync_tool
 bin/
 
 # VS Code

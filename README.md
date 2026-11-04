@@ -16,14 +16,14 @@ make run
 
 ```sh
 make build
-./bin/yandex_disk_saver
+./bin/webdav_sync_tool
 ```
 
 Остановка по Ctrl+C или SIGTERM: приложение дожидается активных загрузок.
 
 ### Запуск через docker-compose
 
-Образ запускает [supercronic](https://github.com/aptible/supercronic), который по расписанию из `/etc/crontab` вызывает `/app/yandex_disk_saver`. Расписание по умолчанию — понедельник, 03:00 (файл `crontab` в репозитории).
+Образ запускает [supercronic](https://github.com/aptible/supercronic), который по расписанию из `/etc/crontab` вызывает `/app/webdav_sync_tool`. Расписание по умолчанию — понедельник, 03:00 (файл `crontab` в репозитории).
 
 ```sh
 cp .env.example .env   # укажите параметры WebDAV
@@ -42,6 +42,7 @@ docker compose up -d
 | `WEBDAV_PORT` | `80` | Порт WebDAV |
 | `WEBDAV_USERNAME` | `user` | Логин |
 | `WEBDAV_PASSWORD` | `password` | Пароль |
+| `WEBDAV_USER_AGENT` | `WebDAVSyncTool/1.0` | Заголовок `User-Agent` в запросах к серверу |
 | `WEBDAV_REMOTE_PATH` | `/` | Начальный удалённый каталог |
 | `DESTINATION_DIR` | `./downloads` | Папка для файлов и отчёта |
 | `MAX_CPUS` | `2` | Число ядер CPU (`GOMAXPROCS`), `0` — без ограничения |

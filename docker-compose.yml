@@ -1,6 +1,6 @@
 services:
-  yandex_disk_saver:
-    image: ghcr.io/towa48/yandex_disk_saver:latest
+  webdav_sync_tool:
+    image: ghcr.io/towa48/webdav_sync_tool:latest
     env_file: .env
     environment:
       DESTINATION_DIR: /vault

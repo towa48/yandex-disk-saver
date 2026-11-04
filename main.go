@@ -6,7 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"yandex_disk_saver/src"
+	"webdav_sync_tool/src"
 )
 
 func main() {

@@ -78,7 +78,7 @@ func (c *WebDAVClient) newRequest(ctx context.Context, method, remotePath string
 		return nil, err
 	}
 	req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
 	return req, nil
 }
 

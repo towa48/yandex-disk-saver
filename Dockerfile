@@ -7,7 +7,7 @@ WORKDIR /src
 COPY go.mod ./
 COPY main.go ./
 COPY src ./src
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/yandex_disk_saver .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /out/webdav_sync_tool .
 
 FROM alpine:3.22
 
@@ -16,7 +16,7 @@ RUN apk add --no-cache curl bash ca-certificates
 COPY --from=ghcr.io/aptible/supercronic:latest \
     /usr/local/bin/supercronic /usr/local/bin/supercronic
 
-COPY --from=build /out/yandex_disk_saver /app/yandex_disk_saver
+COPY --from=build /out/webdav_sync_tool /app/webdav_sync_tool
 COPY crontab /etc/crontab
 
 RUN mkdir -p /vault

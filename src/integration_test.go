@@ -39,6 +39,7 @@ func testConfig(serverURL, dir string) Config {
 		URL:                serverURL,
 		Username:           "user",
 		Password:           "password",
+		UserAgent:          defaultUserAgent,
 		RemotePath:         "/",
 		DestinationDir:     filepath.Join(dir, "downloads"),
 		MaxFileRetries:     3,
@@ -141,7 +142,7 @@ func TestDownloadsRetriesAndStopsPromptly(t *testing.T) {
 
 	mu.Lock()
 	for _, agent := range userAgents {
-		if agent != userAgent {
+		if agent != defaultUserAgent {
 			t.Errorf("неожиданный User-Agent: %q", agent)
 		}
 	}
