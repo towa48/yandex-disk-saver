@@ -73,17 +73,15 @@ func (a *App) writeReport() error {
 	var files []fileInfo
 	var failedFolders []string
 	a.store.With(func(s *State) {
-		for p, folder := range s.Folders {
-			if folder.Status == statusError {
-				failedFolders = append(failedFolders, p)
+		for _, tree := range []*Tree{&s.Src, &s.Dst} {
+			for p, folder := range tree.Folders {
+				if folder.Status == statusError {
+					failedFolders = append(failedFolders, p)
+				}
 			}
 		}
-		for remotePath, file := range s.Files {
-			info := fileInfo{path: remotePath, status: file.Status}
-			if file.Size != nil {
-				info.size = *file.Size
-			}
-			files = append(files, info)
+		for p, file := range s.Src.Files {
+			files = append(files, fileInfo{path: p, size: file.Size, status: file.Status})
 		}
 	})
 
@@ -190,6 +188,6 @@ func (a *App) writeReport() error {
 	if err := os.Rename(temporaryPath, reportPath); err != nil {
 		return err
 	}
-	logMessage(fmt.Sprintf("Отчёт обновлён: %s", reportPath), "info")
+	logMessage(fmt.Sprintf("Report updated: %s", reportPath), "info")
 	return nil
 }

@@ -1,42 +1,58 @@
 package src
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
-type File struct {
-	RemotePath string
-	Size       *int64
-	ETag       string
-	LastMod    string
-	Status     string
-	Attempts   int
-	ErrorCode  string
+// FileNode is a file in a scanned tree. Status, Attempts and ErrorCode are the sync state of a source file.
+type FileNode struct {
+	Path      string
+	Size      int64
+	MD5       string
+	ModTime   time.Time
+	Status    string
+	Attempts  int
+	ErrorCode string
 }
 
-type Folder struct {
+type FolderNode struct {
 	Path     string
 	Status   string
 	Children []string
 }
 
-type LocalFile struct {
-	Path   string
-	Size   int64
-	MD5    string
-	Status string
+// Tree is a scanned storage; paths are relative to the storage root.
+type Tree struct {
+	Files   map[string]*FileNode
+	Folders map[string]*FolderNode
 }
 
-type LocalFolder struct {
-	Path     string
-	Status   string
-	Children []string
+func newTree() Tree {
+	return Tree{Files: map[string]*FileNode{}, Folders: map[string]*FolderNode{}}
 }
 
-// State lives in memory only. Local trees use the same path form as WebDAV ones ("/dir/file", "/dir/").
+// underFailedFolder reports whether p is inside a folder whose listing failed.
+func (t *Tree) underFailedFolder(p string) bool {
+	for folderPath, folder := range t.Folders {
+		if folder.Status == statusError && len(p) >= len(folderPath) && p[:len(folderPath)] == folderPath {
+			return true
+		}
+	}
+	return false
+}
+
+// State lives in memory only.
 type State struct {
-	Files        map[string]*File
-	Folders      map[string]*Folder
-	LocalFiles   map[string]*LocalFile
-	LocalFolders map[string]*LocalFolder
+	Src Tree
+	Dst Tree
+}
+
+func (s *State) tree(source bool) *Tree {
+	if source {
+		return &s.Src
+	}
+	return &s.Dst
 }
 
 // StateStore guards State with a mutex; callbacks must not call back into the store.
@@ -46,12 +62,7 @@ type StateStore struct {
 }
 
 func NewStateStore() *StateStore {
-	return &StateStore{state: State{
-		Files:        map[string]*File{},
-		Folders:      map[string]*Folder{},
-		LocalFiles:   map[string]*LocalFile{},
-		LocalFolders: map[string]*LocalFolder{},
-	}}
+	return &StateStore{state: State{Src: newTree(), Dst: newTree()}}
 }
 
 func (s *StateStore) With(fn func(*State)) {

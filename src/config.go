@@ -26,7 +26,13 @@ const (
 	statusError     = "error"
 )
 
+const (
+	modeWebDAVToFS = "webdav_to_fs"
+	modeFSToWebDAV = "fs_to_webdav"
+)
+
 type Config struct {
+	SyncMode       string
 	URL            string
 	Username       string
 	Password       string
@@ -71,7 +77,7 @@ func LoadDotEnv(path string) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		logMessage(fmt.Sprintf("Не удалось прочитать %s: %v", path, err), "error")
+		logMessage(fmt.Sprintf("Failed to read %s: %v", path, err), "error")
 	}
 }
 
@@ -100,6 +106,11 @@ func ReadConfig() (Config, error) {
 	}
 	if err != nil || port < 1 || port > 65535 {
 		return Config{}, errors.New("WEBDAV_PORT должен быть целым числом от 1 до 65535")
+	}
+
+	syncMode := envOr("SYNC_MODE", modeWebDAVToFS)
+	if syncMode != modeWebDAVToFS && syncMode != modeFSToWebDAV {
+		return Config{}, errors.New("SYNC_MODE должен быть webdav_to_fs или fs_to_webdav")
 	}
 
 	var segments []string
@@ -149,6 +160,7 @@ func ReadConfig() (Config, error) {
 	}
 
 	return Config{
+		SyncMode:           syncMode,
 		URL:                fmt.Sprintf("%s://%s:%d", protocol, host, port),
 		Username:           envOr("WEBDAV_USERNAME", "user"),
 		Password:           envOr("WEBDAV_PASSWORD", "password"),

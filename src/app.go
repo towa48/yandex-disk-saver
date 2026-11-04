@@ -11,12 +11,14 @@ import (
 type App struct {
 	cfg        Config
 	ctx        context.Context
+	stop       context.CancelFunc
 	store      *StateStore
 	client     *WebDAVClient
+	src        Storage
+	dst        Storage
 	mainQueue  *Queue[string]
 	errorQueue *Queue[string]
 	workers    sync.WaitGroup
-	stop       context.CancelFunc
 	reportMu   sync.Mutex
 }
 
@@ -30,9 +32,9 @@ func (a *App) sleep(duration time.Duration) {
 	}
 }
 
-func (a *App) fileState(remotePath string) (status string, attempts int) {
+func (a *App) fileState(path string) (status string, attempts int) {
 	a.store.With(func(s *State) {
-		if file := s.Files[remotePath]; file != nil {
+		if file := s.Src.Files[path]; file != nil {
 			status, attempts = file.Status, file.Attempts
 		}
 	})
@@ -41,7 +43,7 @@ func (a *App) fileState(remotePath string) (status string, attempts int) {
 
 func (a *App) runMainQueue() {
 	for {
-		remotePath, ok := a.mainQueue.Pop()
+		path, ok := a.mainQueue.Pop()
 		if !ok {
 			break
 		}
@@ -50,18 +52,18 @@ func (a *App) runMainQueue() {
 		}
 
 		logMessage(fmt.Sprintf("%sMAIN:%s Processing file: %s. Main queue length: %d.",
-			colorOrange, colorReset, remotePath, a.mainQueue.Len()), "info")
+			colorOrange, colorReset, path, a.mainQueue.Len()), "info")
 
-		if status, _ := a.fileState(remotePath); status != statusPending {
+		if status, _ := a.fileState(path); status != statusPending {
 			continue
 		}
 
 		a.sleep(fileDownloadDelay)
-		if a.attemptDownload(remotePath) {
+		if a.attempt(path) {
 			continue
 		}
-		if _, attempts := a.fileState(remotePath); attempts < a.cfg.MaxFileRetries {
-			a.errorQueue.Push(remotePath)
+		if _, attempts := a.fileState(path); attempts < a.cfg.MaxFileRetries {
+			a.errorQueue.Push(path)
 		}
 	}
 
@@ -72,21 +74,21 @@ func (a *App) runMainQueue() {
 
 func (a *App) runErrorQueue() {
 	for {
-		remotePath, ok := a.errorQueue.Pop()
+		path, ok := a.errorQueue.Pop()
 		if !ok {
 			break
 		}
 
 		logMessage(fmt.Sprintf("%sRETRY:%s Processing file: %s. Error queue length: %d.",
-			colorOrange, colorReset, remotePath, a.errorQueue.Len()), "info")
+			colorOrange, colorReset, path, a.errorQueue.Len()), "info")
 
 		for a.ctx.Err() == nil {
-			status, attempts := a.fileState(remotePath)
+			status, attempts := a.fileState(path)
 			if status != statusError || attempts >= a.cfg.MaxFileRetries {
 				break
 			}
 			a.sleep(fileDownloadDelay)
-			if a.attemptDownload(remotePath) {
+			if a.attempt(path) {
 				break
 			}
 		}
@@ -105,9 +107,15 @@ func (a *App) runPeriodic(task func() error, interval time.Duration, label strin
 	}
 }
 
-// Run works until ctx is cancelled and waits for active downloads before returning.
+// Run works until ctx is cancelled or the sync cycle ends, and waits for active transfers before returning.
 func Run(ctx context.Context, cfg Config) error {
+	logMessage(fmt.Sprintf("Mode: %s", modeLabel(cfg.SyncMode)), "alert")
+
 	if err := os.MkdirAll(cfg.DestinationDir, 0o755); err != nil {
+		return err
+	}
+	diskRoot, err := safeJoin(cfg.DestinationDir, cfg.RemotePath)
+	if err != nil {
 		return err
 	}
 
@@ -122,6 +130,13 @@ func Run(ctx context.Context, cfg Config) error {
 		client:     NewWebDAVClient(cfg),
 		mainQueue:  NewQueue[string](),
 		errorQueue: NewQueue[string](),
+	}
+	webdav := newWebDAVStorage(app)
+	disk := newDiskStorage(ctx, diskRoot)
+	if cfg.SyncMode == modeFSToWebDAV {
+		app.src, app.dst = disk, webdav
+	} else {
+		app.src, app.dst = webdav, disk
 	}
 
 	var tasks sync.WaitGroup
@@ -144,9 +159,9 @@ func Run(ctx context.Context, cfg Config) error {
 	startWorker(app.runErrorQueue)
 
 	start(app.runPipeline)
-	start(func() { app.runPeriodic(app.writeReport, reportInterval, "Ошибка создания отчёта") })
+	start(func() { app.runPeriodic(app.writeReport, reportInterval, "Report error") })
 
-	logMessage(fmt.Sprintf("Запущено. Сервер: %s; папка назначения: %s", cfg.URL, cfg.DestinationDir), "info")
+	logMessage(fmt.Sprintf("Started. Server: %s; destination folder: %s", cfg.URL, cfg.DestinationDir), "info")
 
 	<-ctx.Done()
 	app.mainQueue.Close()
@@ -154,7 +169,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	tasks.Wait()
 	if err := app.writeReport(); err != nil {
-		logMessage(fmt.Sprintf("Ошибка создания отчёта: %v", err), "error")
+		logMessage(fmt.Sprintf("Report error: %v", err), "error")
 	}
 	return nil
 }

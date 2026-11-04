@@ -15,7 +15,7 @@ const (
 
 func logMessage(message, level string) {
 	switch level {
-	case "error":
+	case "error", "alert":
 		message = colorRed + message + colorReset
 	case "warn":
 		message = colorOrange + message + colorReset

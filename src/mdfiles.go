@@ -89,11 +89,15 @@ func (a *App) appendDownloadError(remotePath string, size *int64, code string) {
 	if size != nil {
 		bytes = *size
 	}
-	header := "# Ошибки скачивания\n\nСписок файлов, которые не удалось скачать с WebDAV-сервера.\n\n" +
-		"| Файл | Дата | Размер, МБ | Код ошибки |\n| --- | --- | --- | --- |\n"
+	title, description := "Download errors", "could not be downloaded from the WebDAV server"
+	if a.cfg.SyncMode == modeFSToWebDAV {
+		title, description = "Upload errors", "could not be uploaded to the WebDAV server"
+	}
+	header := "# " + title + "\n\nFiles that " + description + ".\n\n" +
+		"| File | Date | Size, MB | Error code |\n| --- | --- | --- | --- |\n"
 	row := []string{remotePath, time.Now().Format(dateFormat), mdMegabytes(bytes), code}
 	if err := a.appendRows(downloadErrorName, header, [][]string{row}, false); err != nil {
-		logMessage(fmt.Sprintf("Не удалось записать %s: %v", downloadErrorName, err), "error")
+		logMessage(fmt.Sprintf("Failed to write %s: %v", downloadErrorName, err), "error")
 	}
 }
 
@@ -127,10 +131,10 @@ func (a *App) pruneTable(name string, dateColumn int, cutoff time.Time) {
 		return
 	}
 	if err := os.WriteFile(target, []byte(strings.Join(kept, "")), 0o644); err != nil {
-		logMessage(fmt.Sprintf("Не удалось обновить %s: %v", name, err), "error")
+		logMessage(fmt.Sprintf("Failed to update %s: %v", name, err), "error")
 		return
 	}
-	logMessage(fmt.Sprintf("Из %s удалено устаревших записей: %d", name, removed), "info")
+	logMessage(fmt.Sprintf("Removed %d expired records from %s", removed, name), "info")
 }
 
 // purgeOldRecords removes dated reports and old rows of the service md files after TrashRetentionDays.
@@ -152,10 +156,10 @@ func (a *App) purgeOldRecords() {
 			continue
 		}
 		if err := os.Remove(filepath.Join(a.cfg.DestinationDir, name)); err != nil {
-			logMessage(fmt.Sprintf("Не удалось удалить отчёт %s: %v", name, err), "error")
+			logMessage(fmt.Sprintf("Failed to delete report %s: %v", name, err), "error")
 			continue
 		}
-		logMessage(fmt.Sprintf("Удалён устаревший отчёт: %s", name), "info")
+		logMessage(fmt.Sprintf("Deleted expired report: %s", name), "info")
 	}
 
 	a.pruneTable(downloadErrorName, 1, cutoff)

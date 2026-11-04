@@ -14,5 +14,5 @@ func ApplyLimits(cfg Config) {
 	if cfg.MemoryLimitMB > 0 {
 		debug.SetMemoryLimit(int64(cfg.MemoryLimitMB) << 20)
 	}
-	logMessage(fmt.Sprintf("Лимиты: CPU=%d, память=%d МБ (0 — без ограничения).", cfg.MaxCPUs, cfg.MemoryLimitMB), "trace")
+	logMessage(fmt.Sprintf("Limits: CPU=%d, memory=%d MB (0 = unlimited).", cfg.MaxCPUs, cfg.MemoryLimitMB), "trace")
 }
