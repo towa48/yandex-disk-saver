@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const dateFormat = time.DateOnly
+
 func mdCell(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), "|", `\|`)
 }
@@ -89,8 +91,74 @@ func (a *App) appendDownloadError(remotePath string, size *int64, code string) {
 	}
 	header := "# Ошибки скачивания\n\nСписок файлов, которые не удалось скачать с WebDAV-сервера.\n\n" +
 		"| Файл | Дата | Размер, МБ | Код ошибки |\n| --- | --- | --- | --- |\n"
-	row := []string{remotePath, time.Now().Format("2006-01-02"), mdMegabytes(bytes), code}
+	row := []string{remotePath, time.Now().Format(dateFormat), mdMegabytes(bytes), code}
 	if err := a.appendRows(downloadErrorName, header, [][]string{row}, false); err != nil {
 		logMessage(fmt.Sprintf("Не удалось записать %s: %v", downloadErrorName, err), "error")
 	}
+}
+
+// pruneTable drops table rows whose date cell (dateColumn) is older than cutoff; unparsable rows are kept.
+func (a *App) pruneTable(name string, dateColumn int, cutoff time.Time) {
+	a.reportMu.Lock()
+	defer a.reportMu.Unlock()
+
+	target := filepath.Join(a.cfg.DestinationDir, name)
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return
+	}
+
+	lines := strings.SplitAfter(string(data), "\n")
+	kept := make([]string, 0, len(lines))
+	removed := 0
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "|") {
+			cells := splitMDRow(line)
+			if dateColumn < len(cells) {
+				if date, err := time.ParseInLocation(dateFormat, cells[dateColumn], time.Local); err == nil && date.Before(cutoff) {
+					removed++
+					continue
+				}
+			}
+		}
+		kept = append(kept, line)
+	}
+	if removed == 0 {
+		return
+	}
+	if err := os.WriteFile(target, []byte(strings.Join(kept, "")), 0o644); err != nil {
+		logMessage(fmt.Sprintf("Не удалось обновить %s: %v", name, err), "error")
+		return
+	}
+	logMessage(fmt.Sprintf("Из %s удалено устаревших записей: %d", name, removed), "info")
+}
+
+// purgeOldRecords removes dated reports and old rows of the service md files after TrashRetentionDays.
+func (a *App) purgeOldRecords() {
+	cutoff := time.Now().AddDate(0, 0, -a.cfg.TrashRetentionDays)
+
+	entries, err := os.ReadDir(a.cfg.DestinationDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, reportFilePrefix) || !strings.HasSuffix(name, reportFileExt) {
+			continue
+		}
+		datePart := strings.TrimSuffix(strings.TrimPrefix(name, reportFilePrefix), reportFileExt)
+		date, err := time.ParseInLocation("20060102", datePart, time.Local)
+		if err != nil || !date.Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(a.cfg.DestinationDir, name)); err != nil {
+			logMessage(fmt.Sprintf("Не удалось удалить отчёт %s: %v", name, err), "error")
+			continue
+		}
+		logMessage(fmt.Sprintf("Удалён устаревший отчёт: %s", name), "info")
+	}
+
+	a.pruneTable(downloadErrorName, 1, cutoff)
+	a.pruneTable(replaceWarnName, 3, cutoff)
+	a.pruneTable(deleteWarnName, 2, cutoff)
 }

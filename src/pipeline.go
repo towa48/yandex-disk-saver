@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"time"
 )
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -30,6 +31,7 @@ func (a *App) runPipeline() {
 	if ready && a.ctx.Err() == nil {
 		a.handleDeletions()
 		a.purgeTrash()
+		a.purgeOldRecords()
 		logMessage("=> Синхронизация завершена.", "info")
 	}
 }
@@ -195,11 +197,11 @@ func (a *App) queueReplacementsAndDownloads() {
 		logMessage(fmt.Sprintf("Замена %d файлов пропущена: размер превышает %d%% хранилища.", len(replace), a.cfg.ReplaceWarnPercent), "warn")
 		var rows [][]string
 		for _, row := range replace {
-			rows = append(rows, []string{row.path, strconv.FormatInt(row.remoteSize, 10), strconv.FormatInt(row.localSize, 10)})
+			rows = append(rows, []string{row.path, strconv.FormatInt(row.remoteSize, 10), strconv.FormatInt(row.localSize, 10), time.Now().Format(dateFormat)})
 		}
 		header := "# Предупреждение о замене\n\nФайлы на сервере отличаются от локальных (не совпал ETag), но не заменены: " +
 			fmt.Sprintf("их общий размер на сервере превышает %d%% размера всех файлов на сервере.\n\n", a.cfg.ReplaceWarnPercent) +
-			"| Файл | Размер на сервере, байт | Размер в файловой системе, байт |\n| --- | --- | --- |\n"
+			"| Файл | Размер на сервере, байт | Размер в файловой системе, байт | Дата |\n| --- | --- | --- | --- |\n"
 		if err := a.appendRows(replaceWarnName, header, rows, true); err != nil {
 			logMessage(fmt.Sprintf("Не удалось записать %s: %v", replaceWarnName, err), "error")
 		}

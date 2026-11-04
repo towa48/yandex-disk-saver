@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const trashTimeFormat = "2006-01-02 15:04:05"
+const trashTimeFormat = time.DateTime
 
 type trashEntry struct {
 	Path      string
@@ -134,11 +134,11 @@ func (a *App) handleDeletions() {
 		logMessage(fmt.Sprintf("Файлы к удалению (%d шт.) превышают %d%% хранилища, удаление пропущено.", len(stale), a.cfg.DeleteWarnPercent), "warn")
 		var rows [][]string
 		for _, file := range stale {
-			rows = append(rows, []string{file.Path, strconv.FormatInt(file.Size, 10)})
+			rows = append(rows, []string{file.Path, strconv.FormatInt(file.Size, 10), time.Now().Format(dateFormat)})
 		}
 		header := "# Предупреждение об удалении\n\nФайлы, которых больше нет на сервере, не удалены из файловой системы: " +
 			fmt.Sprintf("их общий размер превышает %d%% размера хранилища.\n\n", a.cfg.DeleteWarnPercent) +
-			"| Файл | Размер, байт |\n| --- | --- |\n"
+			"| Файл | Размер, байт | Дата |\n| --- | --- | --- |\n"
 		if err := a.appendRows(deleteWarnName, header, rows, true); err != nil {
 			logMessage(fmt.Sprintf("Не удалось записать %s: %v", deleteWarnName, err), "error")
 		}
