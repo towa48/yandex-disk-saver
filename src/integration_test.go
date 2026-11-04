@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -35,37 +34,18 @@ func writeMultistatus(w http.ResponseWriter, body string) {
 	fmt.Fprint(w, body)
 }
 
-type savedState struct {
-	Files map[string]struct {
-		Status            string `json:"status"`
-		Attempts          int    `json:"attempts"`
-		ETag              string `json:"etag"`
-		IntegrityFailures int    `json:"integrityFailures"`
-	} `json:"files"`
-}
-
-func readSavedState(t *testing.T, path string) savedState {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var saved savedState
-	if err := json.Unmarshal(data, &saved); err != nil {
-		t.Fatal(err)
-	}
-	return saved
-}
-
 func testConfig(serverURL, dir string) Config {
 	return Config{
-		URL:            serverURL,
-		Username:       "user",
-		Password:       "password",
-		RemotePath:     "/",
-		DestinationDir: filepath.Join(dir, "downloads"),
-		StatePath:      filepath.Join(dir, "state.json"),
-		MaxFileRetries: 3,
+		URL:                serverURL,
+		Username:           "user",
+		Password:           "password",
+		RemotePath:         "/",
+		DestinationDir:     filepath.Join(dir, "downloads"),
+		MaxFileRetries:     3,
+		DirectoryRetries:   5,
+		ReplaceWarnPercent: 10,
+		DeleteWarnPercent:  10,
+		TrashRetentionDays: 180,
 	}
 }
 
@@ -79,7 +59,7 @@ func startApp(cfg Config) (cancel context.CancelFunc, done chan struct{}) {
 	return cancel, done
 }
 
-func TestDownloadsRetriesSavesStateAndStopsPromptly(t *testing.T) {
+func TestDownloadsRetriesAndStopsPromptly(t *testing.T) {
 	dir := t.TempDir()
 
 	var mu sync.Mutex
@@ -143,7 +123,9 @@ func TestDownloadsRetriesSavesStateAndStopsPromptly(t *testing.T) {
 
 	deadline := time.Now().Add(18 * time.Second)
 	for time.Now().Before(deadline) {
-		if failed, corrupt := snapshot(); failed >= 4 && corrupt >= 2 {
+		failed, corrupt := snapshot()
+		_, errFile := os.Stat(filepath.Join(cfg.DestinationDir, downloadErrorName))
+		if failed >= 4 && corrupt >= 2 && errFile == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -182,19 +164,21 @@ func TestDownloadsRetriesSavesStateAndStopsPromptly(t *testing.T) {
 		t.Fatal("остановка приложения заняла больше 4 секунд")
 	}
 
-	saved := readSavedState(t, cfg.StatePath)
-	if got := saved.Files["/folder/ok.txt"].Status; got != statusCompleted {
-		t.Errorf("ok.txt: статус %q", got)
+	downloadErrors, err := os.ReadFile(filepath.Join(cfg.DestinationDir, downloadErrorName))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := saved.Files["/folder/fail.txt"]; got.Status != statusError || got.Attempts < 2 {
-		t.Errorf("fail.txt: %+v", got)
+	if !strings.Contains(string(downloadErrors), "/folder/fail.txt") || !strings.Contains(string(downloadErrors), "500") {
+		t.Errorf("DOWNLOAD_ERROR.md: %s", downloadErrors)
 	}
-	corruptFile := saved.Files["/folder/corrupt.txt"]
-	if corruptFile.ETag != md5Hex("good") || corruptFile.IntegrityFailures != 1 || corruptFile.Status != statusCompleted {
-		t.Errorf("corrupt.txt: %+v", corruptFile)
+	if strings.Contains(string(downloadErrors), "ok.txt") || strings.Contains(string(downloadErrors), "corrupt.txt") {
+		t.Errorf("DOWNLOAD_ERROR.md содержит лишние файлы: %s", downloadErrors)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DestinationDir, "folder", "fail.txt.tmp")); err == nil {
+		t.Error("остался tmp-файл")
 	}
 
-	report, err := os.ReadFile(filepath.Join(cfg.DestinationDir, "download-report.html"))
+	report, err := os.ReadFile(filepath.Join(cfg.DestinationDir, "download-report-"+time.Now().Format("20060102")+".html"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +189,7 @@ func TestDownloadsRetriesSavesStateAndStopsPromptly(t *testing.T) {
 	}
 }
 
-func TestShutdownWaitsForActiveDownloadBeforeSavingState(t *testing.T) {
+func TestShutdownWaitsForActiveDownload(t *testing.T) {
 	dir := t.TempDir()
 	const contents = "done"
 
@@ -265,10 +249,7 @@ func TestShutdownWaitsForActiveDownloadBeforeSavingState(t *testing.T) {
 		t.Fatal("ожидание загрузки при остановке превысило 5 секунд")
 	}
 
-	saved := readSavedState(t, cfg.StatePath)
-	if got := saved.Files["/slow.txt"].Status; got != statusCompleted {
-		t.Errorf("slow.txt: статус %q", got)
-	}
+	assertFile(t, filepath.Join(cfg.DestinationDir, "slow.txt"), contents)
 }
 
 func assertFile(t *testing.T, path, expected string) {
@@ -280,5 +261,69 @@ func assertFile(t *testing.T, path, expected string) {
 	}
 	if string(data) != expected {
 		t.Errorf("%s: %q, ожидалось %q", path, data, expected)
+	}
+}
+
+func TestSyncCopiesReplacesDownloadsAndTrashes(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{"/a.txt": "A", "/dup.txt": "A", "/new.txt": "new", "/change.txt": "fresh"}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PROPFIND" {
+			var responses []string
+			for name, contents := range files {
+				responses = append(responses, davResponse(name, fmt.Sprintf("<d:resourcetype/><d:getcontentlength>%d</d:getcontentlength><d:getetag>%s</d:getetag>", len(contents), md5Hex(contents))))
+			}
+			writeMultistatus(w, multistatusBody(responses...))
+			return
+		}
+		if contents, ok := files[r.URL.Path]; ok && r.Method == http.MethodGet {
+			if r.URL.Path == "/dup.txt" || r.URL.Path == "/a.txt" {
+				t.Errorf("файл %s не должен скачиваться", r.URL.Path)
+			}
+			fmt.Fprint(w, contents)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cfg := testConfig(server.URL, dir)
+	cfg.ReplaceWarnPercent = 100
+	cfg.DeleteWarnPercent = 100
+	if err := os.MkdirAll(cfg.DestinationDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{"a.txt": "A", "change.txt": "old", "stale.txt": "zzz"} {
+		if err := os.WriteFile(filepath.Join(cfg.DestinationDir, name), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cancel, done := startApp(cfg)
+	defer cancel()
+
+	index := filepath.Join(cfg.DestinationDir, trashDirName, trashIndexName)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(index); err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	assertFile(t, filepath.Join(cfg.DestinationDir, "a.txt"), "A")
+	assertFile(t, filepath.Join(cfg.DestinationDir, "dup.txt"), "A")
+	assertFile(t, filepath.Join(cfg.DestinationDir, "new.txt"), "new")
+	assertFile(t, filepath.Join(cfg.DestinationDir, "change.txt"), "fresh")
+	assertFile(t, filepath.Join(cfg.DestinationDir, trashDirName, "stale.txt"), "zzz")
+	if _, err := os.Stat(filepath.Join(cfg.DestinationDir, "stale.txt")); err == nil {
+		t.Error("stale.txt должен быть перемещён в корзину")
+	}
+	data, err := os.ReadFile(index)
+	if err != nil || !strings.Contains(string(data), "/stale.txt") {
+		t.Errorf("TRASH.md: %q, %v", data, err)
 	}
 }

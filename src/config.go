@@ -21,10 +21,9 @@ const (
 )
 
 const (
-	statusPending     = "pending"
-	statusDownloading = "downloading"
-	statusCompleted   = "completed"
-	statusError       = "error"
+	statusPending   = "pending"
+	statusCompleted = "completed"
+	statusError     = "error"
 )
 
 type Config struct {
@@ -33,10 +32,14 @@ type Config struct {
 	Password       string
 	RemotePath     string
 	DestinationDir string
-	StatePath      string
 	MaxCPUs        int
 	MemoryLimitMB  int
 	MaxFileRetries int
+
+	DirectoryRetries   int
+	ReplaceWarnPercent int
+	DeleteWarnPercent  int
+	TrashRetentionDays int
 }
 
 // LoadDotEnv does not override variables that are already set.
@@ -113,11 +116,6 @@ func ReadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	statePath, err := filepath.Abs(envOr("STATE_FILE", "./state.json"))
-	if err != nil {
-		return Config{}, err
-	}
-
 	maxCPUs, err := envInt("MAX_CPUS", 2)
 	if err != nil {
 		return Config{}, err
@@ -131,15 +129,36 @@ func ReadConfig() (Config, error) {
 		return Config{}, err
 	}
 
+	directoryRetries, err := envInt("DIRECTORY_RETRIES", 5)
+	if err != nil {
+		return Config{}, err
+	}
+
+	replaceWarnPercent, err := envInt("REPLACE_WARN_PERCENT", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	deleteWarnPercent, err := envInt("DELETE_WARN_PERCENT", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	trashRetentionDays, err := envInt("TRASH_RETENTION_DAYS", 180)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
-		URL:            fmt.Sprintf("%s://%s:%d", protocol, host, port),
-		Username:       envOr("WEBDAV_USERNAME", "user"),
-		Password:       envOr("WEBDAV_PASSWORD", "password"),
-		RemotePath:     remotePath,
-		DestinationDir: destinationDir,
-		StatePath:      statePath,
-		MaxCPUs:        maxCPUs,
-		MemoryLimitMB:  memoryLimitMB,
-		MaxFileRetries: maxFileRetries,
+		URL:                fmt.Sprintf("%s://%s:%d", protocol, host, port),
+		Username:           envOr("WEBDAV_USERNAME", "user"),
+		Password:           envOr("WEBDAV_PASSWORD", "password"),
+		RemotePath:         remotePath,
+		DestinationDir:     destinationDir,
+		MaxCPUs:            maxCPUs,
+		MemoryLimitMB:      memoryLimitMB,
+		MaxFileRetries:     maxFileRetries,
+		DirectoryRetries:   directoryRetries,
+		ReplaceWarnPercent: replaceWarnPercent,
+		DeleteWarnPercent:  deleteWarnPercent,
+		TrashRetentionDays: trashRetentionDays,
 	}, nil
 }

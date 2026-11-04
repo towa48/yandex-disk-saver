@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"sync"
 	"time"
 )
@@ -16,6 +15,9 @@ type App struct {
 	client     *WebDAVClient
 	mainQueue  *Queue[string]
 	errorQueue *Queue[string]
+	workers    sync.WaitGroup
+	stop       context.CancelFunc
+	reportMu   sync.Mutex
 }
 
 // sleep returns early once the app context is cancelled.
@@ -28,33 +30,13 @@ func (a *App) sleep(duration time.Duration) {
 	}
 }
 
-func (a *App) loadState() {
-	logMessage("Загружаем состояние...", "trace")
-	a.store.Load()
-
-	logMessage("Формируем очередь загрузки...", "trace")
+func (a *App) fileState(remotePath string) (status string, attempts int) {
 	a.store.With(func(s *State) {
-		paths := make([]string, 0, len(s.Files))
-		for remotePath := range s.Files {
-			paths = append(paths, remotePath)
-		}
-		sort.Strings(paths)
-
-		for _, remotePath := range paths {
-			file := s.Files[remotePath]
-			if file.Status == statusDownloading {
-				file.Status = statusPending
-			}
-			if file.Status == statusPending {
-				a.mainQueue.Push(remotePath)
-			} else if file.Status == statusError {
-				a.errorQueue.Push(remotePath)
-			}
+		if file := s.Files[remotePath]; file != nil {
+			status, attempts = file.Status, file.Attempts
 		}
 	})
-
-	logMessage(fmt.Sprintf("Состояние загружено. %d файлов в основной очереди и %d в очереди ошибок.",
-		a.mainQueue.Len(), a.errorQueue.Len()), "info")
+	return status, attempts
 }
 
 func (a *App) runMainQueue() {
@@ -70,17 +52,16 @@ func (a *App) runMainQueue() {
 		logMessage(fmt.Sprintf("%sMAIN:%s Processing file: %s. Main queue length: %d.",
 			colorOrange, colorReset, remotePath, a.mainQueue.Len()), "info")
 
-		var status string
-		var size *int64
-		a.store.With(func(s *State) {
-			if file := s.Files[remotePath]; file != nil {
-				status, size = file.Status, file.Size
-			}
-		})
+		if status, _ := a.fileState(remotePath); status != statusPending {
+			continue
+		}
 
-		if status == statusPending {
-			a.sleep(fileDownloadDelay)
-			a.downloadFile(remotePath, calculateDownloadTimeout(size))
+		a.sleep(fileDownloadDelay)
+		if a.attemptDownload(remotePath) {
+			continue
+		}
+		if _, attempts := a.fileState(remotePath); attempts < a.cfg.MaxFileRetries {
+			a.errorQueue.Push(remotePath)
 		}
 	}
 
@@ -96,23 +77,19 @@ func (a *App) runErrorQueue() {
 			break
 		}
 
-		var status string
-		var attempts int
-		var size *int64
-		a.store.With(func(s *State) {
-			if file := s.Files[remotePath]; file != nil {
-				status, attempts, size = file.Status, file.Attempts, file.Size
-			}
-		})
-		if a.ctx.Err() != nil || status != statusError || attempts >= a.cfg.MaxFileRetries {
-			continue
-		}
-
-		a.sleep(fileDownloadDelay)
-
 		logMessage(fmt.Sprintf("%sRETRY:%s Processing file: %s. Error queue length: %d.",
 			colorOrange, colorReset, remotePath, a.errorQueue.Len()), "info")
-		a.downloadFile(remotePath, calculateDownloadTimeout(size))
+
+		for a.ctx.Err() == nil {
+			status, attempts := a.fileState(remotePath)
+			if status != statusError || attempts >= a.cfg.MaxFileRetries {
+				break
+			}
+			a.sleep(fileDownloadDelay)
+			if a.attemptDownload(remotePath) {
+				break
+			}
+		}
 	}
 
 	logMessage(fmt.Sprintf("%sRETRY:%s Worker stopped. Error queue length: %d.",
@@ -128,16 +105,20 @@ func (a *App) runPeriodic(task func() error, interval time.Duration, label strin
 	}
 }
 
-// Run works until ctx is cancelled, then waits for active downloads and saves the state.
+// Run works until ctx is cancelled and waits for active downloads before returning.
 func Run(ctx context.Context, cfg Config) error {
 	if err := os.MkdirAll(cfg.DestinationDir, 0o755); err != nil {
 		return err
 	}
 
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+
 	app := &App{
 		cfg:        cfg,
 		ctx:        ctx,
-		store:      NewStateStore(cfg.StatePath),
+		stop:       stop,
+		store:      NewStateStore(),
 		client:     NewWebDAVClient(cfg),
 		mainQueue:  NewQueue[string](),
 		errorQueue: NewQueue[string](),
@@ -151,13 +132,18 @@ func Run(ctx context.Context, cfg Config) error {
 			fn()
 		}()
 	}
+	startWorker := func(fn func()) {
+		app.workers.Add(1)
+		start(func() {
+			defer app.workers.Done()
+			fn()
+		})
+	}
 
-	start(app.runMainQueue)
-	start(app.runErrorQueue)
+	startWorker(app.runMainQueue)
+	startWorker(app.runErrorQueue)
 
-	app.loadState()
-
-	start(app.discoverRemoteFiles)
+	start(app.runPipeline)
 	start(func() { app.runPeriodic(app.writeReport, reportInterval, "Ошибка создания отчёта") })
 
 	logMessage(fmt.Sprintf("Запущено. Сервер: %s; папка назначения: %s", cfg.URL, cfg.DestinationDir), "info")
@@ -167,7 +153,8 @@ func Run(ctx context.Context, cfg Config) error {
 	app.errorQueue.Close()
 
 	tasks.Wait()
-	logMessage("Остановка: сохраняю состояние...", "info")
-	app.store.Save()
+	if err := app.writeReport(); err != nil {
+		logMessage(fmt.Sprintf("Ошибка создания отчёта: %v", err), "error")
+	}
 	return nil
 }

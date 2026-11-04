@@ -13,8 +13,8 @@ import (
 )
 
 type folderSummary struct {
-	total, completed, errors int
-	bytes                    int64
+	total, completed, errors, failedDirs int
+	bytes                                int64
 }
 
 func escapeHTML(value string) string {
@@ -59,22 +59,27 @@ const reportTemplate = `<!doctype html>
 <body><main>
   <h1>Отчёт о скачивании WebDAV</h1>
   <p>Обновлено: {{UPDATED}}. Файлов: {{COUNT}}.</p>
-  <table><thead><tr><th>Папка (до 2 уровней)</th><th>Общий размер</th><th>Скачано</th><th>Файлов с ошибками</th></tr></thead>
+  <table><thead><tr><th>Папка (до 2 уровней)</th><th>Общий размер</th><th>Скачано</th><th>Файлов с ошибками</th><th>Каталогов не получено</th></tr></thead>
   <tbody>{{ROWS}}</tbody></table>
 </main></body></html>`
 
 func (a *App) writeReport() error {
 	type fileInfo struct {
-		path     string
-		size     int64
-		status   string
-		attempts int
+		path   string
+		size   int64
+		status string
 	}
 
 	var files []fileInfo
+	var failedFolders []string
 	a.store.With(func(s *State) {
+		for p, folder := range s.Folders {
+			if folder.Status == statusError {
+				failedFolders = append(failedFolders, p)
+			}
+		}
 		for remotePath, file := range s.Files {
-			info := fileInfo{path: remotePath, status: file.Status, attempts: file.Attempts}
+			info := fileInfo{path: remotePath, status: file.Status}
 			if file.Size != nil {
 				info.size = *file.Size
 			}
@@ -83,9 +88,9 @@ func (a *App) writeReport() error {
 	})
 
 	folders := map[string]*folderSummary{}
-	for _, file := range files {
+	levels := func(remotePath string) []string {
 		var parts []string
-		for _, part := range strings.Split(file.path, "/") {
+		for _, part := range strings.Split(remotePath, "/") {
 			if part != "" {
 				parts = append(parts, part)
 			}
@@ -97,19 +102,31 @@ func (a *App) writeReport() error {
 		if len(parts) > 1 {
 			folderPaths = append(folderPaths, "/"+parts[0]+"/"+parts[1])
 		}
+		return folderPaths
+	}
+	summaryFor := func(folderPath string) *folderSummary {
+		summary := folders[folderPath]
+		if summary == nil {
+			summary = &folderSummary{}
+			folders[folderPath] = summary
+		}
+		return summary
+	}
 
-		for _, folderPath := range folderPaths {
-			summary := folders[folderPath]
-			if summary == nil {
-				summary = &folderSummary{}
-				folders[folderPath] = summary
-			}
+	for _, failed := range failedFolders {
+		for _, folderPath := range levels(failed) {
+			summaryFor(folderPath).failedDirs++
+		}
+	}
+	for _, file := range files {
+		for _, folderPath := range levels(file.path) {
+			summary := summaryFor(folderPath)
 			summary.total++
 			summary.bytes += file.size
 			if file.status == statusCompleted {
 				summary.completed++
 			}
-			if file.status == statusError || (file.status == statusDownloading && file.attempts > 0) {
+			if file.status == statusError {
 				summary.errors++
 			}
 		}
@@ -135,7 +152,7 @@ func (a *App) writeReport() error {
 			percent = int(math.Round(float64(summary.completed) / float64(summary.total) * 100))
 		}
 		rowClass := ""
-		if summary.errors > 0 {
+		if summary.errors > 0 || summary.failedDirs > 0 {
 			rowClass = "error"
 		} else if summary.total > 0 && summary.completed == summary.total {
 			rowClass = "complete"
@@ -149,11 +166,11 @@ func (a *App) writeReport() error {
 		if rows.Len() > 0 {
 			rows.WriteString("\n")
 		}
-		fmt.Fprintf(&rows, `<tr class="%s"><td style="padding-left:%dpx">%s</td><td>%s</td><td>%d%% (%d/%d)</td><td>%d</td></tr>`,
-			rowClass, depth*20+12, escapeHTML(label), formatBytes(summary.bytes), percent, summary.completed, summary.total, summary.errors)
+		fmt.Fprintf(&rows, `<tr class="%s"><td style="padding-left:%dpx">%s</td><td>%s</td><td>%d%% (%d/%d)</td><td>%d</td><td>%d</td></tr>`,
+			rowClass, depth*20+12, escapeHTML(label), formatBytes(summary.bytes), percent, summary.completed, summary.total, summary.errors, summary.failedDirs)
 	}
 	if rows.Len() == 0 {
-		rows.WriteString(`<tr><td colspan="4">Файлы не найдены</td></tr>`)
+		rows.WriteString(`<tr><td colspan="5">Файлы не найдены</td></tr>`)
 	}
 
 	page := strings.NewReplacer(
@@ -162,7 +179,7 @@ func (a *App) writeReport() error {
 		"{{ROWS}}", rows.String(),
 	).Replace(reportTemplate)
 
-	reportPath := filepath.Join(a.cfg.DestinationDir, "download-report.html")
+	reportPath := filepath.Join(a.cfg.DestinationDir, reportFilePrefix+time.Now().Format("20060102")+reportFileExt)
 	temporaryPath := reportPath + ".tmp"
 	if err := os.MkdirAll(a.cfg.DestinationDir, 0o755); err != nil {
 		return err

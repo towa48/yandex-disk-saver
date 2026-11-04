@@ -3,14 +3,39 @@ package src
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
+
+type md5MismatchError struct{ expected, actual string }
+
+func (e *md5MismatchError) Error() string {
+	return fmt.Sprintf("MD5 не совпал: ожидался %s, получен %s", e.expected, e.actual)
+}
+
+func errorCode(err error) string {
+	if status := httpStatus(err); status != 0 {
+		return strconv.Itoa(status)
+	}
+	var mismatch *md5MismatchError
+	if errors.As(err, &mismatch) {
+		return "MD5"
+	}
+	return "ERR"
+}
+
+// normalizeETag strips quotes and the weak prefix so an MD5 ETag can be compared with a hash.
+func normalizeETag(etag string) string {
+	return strings.ToLower(strings.Trim(strings.TrimPrefix(strings.TrimPrefix(etag, "W/"), "w/"), `"`))
+}
 
 func calculateDownloadTimeout(size *int64) time.Duration {
 	if size == nil || *size == 0 {
@@ -26,7 +51,7 @@ func calculateDownloadTimeout(size *int64) time.Duration {
 	return time.Duration(seconds*float64(time.Second)) + extraReserve
 }
 
-func (a *App) localPathFor(remotePath string) (string, error) {
+func safeJoin(root, remotePath string) (string, error) {
 	var segments []string
 	for _, segment := range strings.Split(remotePath, "/") {
 		if segment == "" {
@@ -38,12 +63,16 @@ func (a *App) localPathFor(remotePath string) (string, error) {
 		segments = append(segments, segment)
 	}
 
-	localPath := filepath.Join(append([]string{a.cfg.DestinationDir}, segments...)...)
-	relative, err := filepath.Rel(a.cfg.DestinationDir, localPath)
+	localPath := filepath.Join(append([]string{root}, segments...)...)
+	relative, err := filepath.Rel(root, localPath)
 	if err != nil || strings.HasPrefix(relative, "..") || filepath.IsAbs(relative) {
 		return "", fmt.Errorf("путь выходит за папку назначения: %s", remotePath)
 	}
 	return localPath, nil
+}
+
+func (a *App) localPathFor(remotePath string) (string, error) {
+	return safeJoin(a.cfg.DestinationDir, remotePath)
 }
 
 // fetchToFile streams the file to temporaryPath and returns its MD5.
@@ -72,6 +101,7 @@ func (a *App) fetchToFile(remotePath, temporaryPath string, timeout time.Duratio
 	return attempt()
 }
 
+// fetchToDisk downloads to <file>.tmp, verifies MD5, then swaps it in for the original.
 func (a *App) fetchToDisk(remotePath, etag string, timeout time.Duration) error {
 	destination, err := a.localPathFor(remotePath)
 	if err != nil {
@@ -81,7 +111,7 @@ func (a *App) fetchToDisk(remotePath, etag string, timeout time.Duration) error 
 		return err
 	}
 
-	temporaryPath := destination + ".part"
+	temporaryPath := destination + ".tmp"
 	actual, err := a.fetchToFile(remotePath, temporaryPath, timeout)
 	if err != nil {
 		os.Remove(temporaryPath)
@@ -89,68 +119,74 @@ func (a *App) fetchToDisk(remotePath, etag string, timeout time.Duration) error 
 	}
 
 	if etag != "" {
-		expected := strings.ToLower(strings.Trim(strings.TrimPrefix(strings.TrimPrefix(etag, "W/"), "w/"), `"`))
-
-		if actual != expected {
+		if expected := normalizeETag(etag); actual != expected {
 			os.Remove(temporaryPath)
-			os.Remove(destination)
-			a.store.With(func(s *State) {
-				if file := s.Files[remotePath]; file != nil {
-					file.IntegrityFailures++
-				}
-			})
-			return fmt.Errorf("MD5 не совпал: ожидался %s, получен %s", expected, actual)
+			return &md5MismatchError{expected: expected, actual: actual}
 		}
 	}
 
-	return os.Rename(temporaryPath, destination)
+	if err := os.Remove(destination); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		os.Remove(temporaryPath)
+		return err
+	}
+	if err := os.Rename(temporaryPath, destination); err != nil {
+		os.Remove(temporaryPath)
+		return err
+	}
+	return nil
 }
 
-func (a *App) downloadFile(remotePath string, timeout time.Duration) {
+// attemptDownload makes one download attempt and updates the file status; it reports success.
+func (a *App) attemptDownload(remotePath string) bool {
 	if a.ctx.Err() != nil {
-		return
+		return false
 	}
 
 	var etag string
+	var size *int64
 	var found bool
 	a.store.With(func(s *State) {
 		if file := s.Files[remotePath]; file != nil {
-			found, etag = true, file.ETag
+			found, etag, size = true, file.ETag, file.Size
 		}
 	})
 	if !found {
-		return
+		return false
 	}
 
+	timeout := calculateDownloadTimeout(size)
 	if timeout <= 0 {
 		timeout = defaultDownloadTimeout
 	}
 	logMessage(fmt.Sprintf("Начало скачивания: %s. Таймаут: %.2f сек.", remotePath, timeout.Seconds()), "trace")
 
-	a.store.Update(func(s *State) { s.Files[remotePath].Status = statusDownloading })
-
 	if err := a.fetchToDisk(remotePath, etag, timeout); err != nil {
 		logMessage(fmt.Sprintf("Ошибка %s: %v.", remotePath, err), "error")
 
 		var attempts int
-		a.store.Update(func(s *State) {
+		a.store.With(func(s *State) {
 			file := s.Files[remotePath]
 			file.Status = statusError
 			file.Attempts++
+			file.ErrorCode = errorCode(err)
 			attempts = file.Attempts
 		})
-
-		// append the file to the error queue if it hasn't reached the max retries yet
-		if attempts < a.cfg.MaxFileRetries {
-			a.errorQueue.Push(remotePath)
+		if attempts >= a.cfg.MaxFileRetries {
+			a.appendDownloadError(remotePath, size, errorCode(err))
 		}
-		return
+		return false
 	}
 
-	a.store.Update(func(s *State) {
-		file := s.Files[remotePath]
-		file.Status = statusCompleted
-		file.DownloadedAt = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	var localSize int64
+	if destination, err := a.localPathFor(remotePath); err == nil {
+		if info, err := os.Stat(destination); err == nil {
+			localSize = info.Size()
+		}
+	}
+	a.store.With(func(s *State) {
+		s.Files[remotePath].Status = statusCompleted
+		s.LocalFiles[remotePath] = &LocalFile{Path: remotePath, Size: localSize, MD5: normalizeETag(etag), Status: statusCompleted}
 	})
 	logMessage(fmt.Sprintf("Скачан: %s", remotePath), "trace")
+	return true
 }
