@@ -1,0 +1,2 @@
+# every Monday at 03:00
+0 3 * * 1 /app/yandex_disk_saver

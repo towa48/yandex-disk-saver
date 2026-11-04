@@ -124,7 +124,7 @@ func ReadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxFileRetries, err := envInt("MAX_FILE_RETRIES", 3)
+	maxFileRetries, err := envInt("MAX_FILE_RETRIES", 2)
 	if err != nil {
 		return Config{}, err
 	}

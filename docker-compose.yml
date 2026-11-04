@@ -1,0 +1,10 @@
+services:
+  yandex_disk_saver:
+    image: ghcr.io/towa48/yandex_disk_saver:latest
+    env_file: .env
+    environment:
+      DESTINATION_DIR: /vault
+    volumes:
+      - ./downloads:/vault
+#      - ./crontab:/etc/crontab:ro
+    restart: unless-stopped
