@@ -113,7 +113,7 @@ func ReadConfig() (Config, error) {
 		remotePath = "/" + strings.Join(segments, "/") + "/"
 	}
 
-	destinationDir, err := filepath.Abs(envOr("DESTINATION_DIR", "./downloads"))
+	destinationDir, err := filepath.Abs(envOr("VAULT_DIR", "./downloads"))
 	if err != nil {
 		return Config{}, err
 	}

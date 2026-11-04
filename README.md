@@ -30,7 +30,7 @@ cp .env.example .env   # укажите параметры WebDAV
 docker compose up -d
 ```
 
-- Переменные берутся из `.env`; `DESTINATION_DIR` в compose-файле принудительно задан как `/vault`.
+- Переменные берутся из `.env`; `VAULT_DIR` в compose-файле принудительно задан как `/vault`.
 - Файлы сохраняются в `./downloads` на хосте (том `./downloads:/vault`).
 - Чтобы изменить расписание, отредактируйте `crontab`, раскомментируйте в `docker-compose.yml` строку `./crontab:/etc/crontab:ro` и перезапустите контейнер: `docker compose up -d --force-recreate`.
 - Логи: `docker compose logs -f`.
@@ -44,7 +44,7 @@ docker compose up -d
 | `WEBDAV_PASSWORD` | `password` | Пароль |
 | `WEBDAV_USER_AGENT` | `WebDAVSyncTool/1.0` | Заголовок `User-Agent` в запросах к серверу |
 | `WEBDAV_REMOTE_PATH` | `/` | Начальный удалённый каталог |
-| `DESTINATION_DIR` | `./downloads` | Папка для файлов и отчёта |
+| `VAULT_DIR` | `./downloads` | Папка для файлов и отчёта |
 | `MAX_CPUS` | `2` | Число ядер CPU (`GOMAXPROCS`), `0` — без ограничения |
 | `MEMORY_LIMIT_MB` | `256` | Мягкий лимит памяти в МБ (`GOMEMLIMIT`), `0` — без ограничения |
 | `MAX_FILE_RETRIES` | `2` | Максимальное число попыток скачивания одного файла (включая первую) |

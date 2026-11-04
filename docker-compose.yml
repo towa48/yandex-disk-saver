@@ -3,7 +3,7 @@ services:
     image: ghcr.io/towa48/webdav_sync_tool:latest
     env_file: .env
     environment:
-      DESTINATION_DIR: /vault
+      VAULT_DIR: /vault
     volumes:
       - ./downloads:/vault
 #      - ./crontab:/etc/crontab:ro
