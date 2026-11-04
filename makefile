@@ -15,5 +15,9 @@ endif
 
 build:
 	@echo "Building the project..."
-	go build -o yandex_disk_saver
+	go build -o bin/yandex_disk_saver
 	@echo "✓ Build complete."
+
+run:
+	@echo "Run the project..."
+	go run .

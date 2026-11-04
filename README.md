@@ -9,14 +9,14 @@ Go-приложение рекурсивно скачивает файлы с We
 Скопируйте `.env.example` в `.env`, укажите параметры сервера и запустите:
 
 ```sh
-go run .
+make run
 ```
 
 Или соберите исполняемый файл:
 
 ```sh
-go build -o yandex_disk_saver .
-./yandex_disk_saver
+make build
+./bin/yandex_disk_saver
 ```
 
 Остановка по Ctrl+C или SIGTERM: приложение дожидается активных загрузок и сохраняет состояние.

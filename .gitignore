@@ -12,6 +12,7 @@ state.json.tmp
 # GO Executables
 yandex_disk_saver.exe
 yandex_disk_saver
+bin/
 
 # VS Code
 .vscode/
